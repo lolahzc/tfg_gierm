@@ -50,7 +50,7 @@ class Agent{
 	mission_planner::msg::AgentBeacon last_beacon_;
 
 	//Node Handlers
-	rclcpp::Node nh_;
+	rclcpp::Node::SharedPtr nh_;
 
     //Subscribers
 	rclcpp::Subscription<as2_msgs::msg::PoseStampedWithID>::SharedPtr position_sub_;
@@ -63,11 +63,13 @@ class Agent{
     float battery_; //percentage
 
     //Actions
-	rclcpp_action::Client<mission_planner::action::NewTaskList> ntl_ac_;
-	rclcpp_action::Server<mission_planner::action::BatteryEnough> battery_as_;
-    rclcpp_action::Server<mission_planner::action::TaskResult> task_result_as_;
-	bool battery_enough_;
-	mission_planner::action::BatteryEnough::Feedback battery_feedback_;
+    rclcpp_action::Client<mission_planner::action::NewTaskList>::SharedPtr ntl_ac_;
+	rclcpp_action::Server<mission_planner::action::BatteryEnough>::SharedPtr battery_as_;
+    rclcpp_action::Server<mission_planner::action::TaskResult>::SharedPtr task_result_as_;
+	
+    bool battery_enough_;
+	
+    mission_planner::action::BatteryEnough::Feedback battery_feedback_;
 	mission_planner::action::BatteryEnough::Result battery_result_;
 
   public:
@@ -110,7 +112,7 @@ class Agent{
 	void setLastBeacon(mission_planner::msg::AgentBeacon last_beacon);
 
 	//Callbacks
-    void positionCallbackUAL(const geometry_msgs::msg::PoseStamped& pose);
+    void positionCallbackAS2(const geometry_msgs::msg::PoseStamped& pose);
     void batteryCallback(const sensor_msgs::msg::BatteryState& battery);
 	void batteryEnoughCB(const mission_planner::action::BatteryEnough_Goal::ConstPtr& goal);
 	void taskResultCB(const mission_planner::action::TaskResult_Goal::ConstPtr& goal);
