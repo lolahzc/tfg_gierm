@@ -1,0 +1,20 @@
+// generated from rosidl_adapter/resource/action.idl.em
+// with input from mission_planner/action/RequestMobileChargingStation.action
+// generated code does not contain a copyright notice
+
+
+module mission_planner {
+  module action {
+    struct RequestMobileChargingStation_Goal {
+      string requester_id;
+    };
+    struct RequestMobileChargingStation_Result {
+      boolean success;
+
+      string message;
+    };
+    struct RequestMobileChargingStation_Feedback {
+      uint8 structure_needs_at_least_one_member;
+    };
+  };
+};

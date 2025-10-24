@@ -1,0 +1,17 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from mission_planner/msg/Tool.msg
+// generated code does not contain a copyright notice
+
+#include "mission_planner/msg/Position.idl"
+
+module mission_planner {
+  module msg {
+    struct Tool {
+      string id;
+
+      float weight;
+
+      mission_planner::msg::Position position;
+    };
+  };
+};

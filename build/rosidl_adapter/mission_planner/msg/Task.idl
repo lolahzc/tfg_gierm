@@ -1,0 +1,44 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from mission_planner/msg/Task.msg
+// generated code does not contain a copyright notice
+
+#include "mission_planner/msg/DeliverToolParams.idl"
+#include "mission_planner/msg/GenericTaskParams.idl"
+#include "mission_planner/msg/InspectParams.idl"
+#include "mission_planner/msg/MonitorParams.idl"
+#include "mission_planner/msg/MonitorUGVParams.idl"
+#include "mission_planner/msg/RechargeParams.idl"
+#include "mission_planner/msg/WaitParams.idl"
+
+module mission_planner {
+  module msg {
+    @verbatim (language="comment", text=
+      "type M/m   ->  Monitor" "\n"
+      "type F/f   ->  MonitorUGV" "\n"
+      "type I/i   ->  Inspect" "\n"
+      "type A/a   ->  InspectPVArray" "\n"
+      "type D/d   ->  Deliver" "\n"
+      "type R/r   ->  Recharge" "\n"
+      "type W/w   ->  Wait" "\n"
+      "type G/g   ->  Generic")
+    struct Task {
+      string id;
+
+      uint8 type;
+
+      mission_planner::msg::MonitorParams monitor;
+
+      mission_planner::msg::MonitorUGVParams monitor_ugv;
+
+      mission_planner::msg::InspectParams inspect;
+
+      mission_planner::msg::DeliverToolParams deliver;
+
+      mission_planner::msg::RechargeParams recharge;
+
+      mission_planner::msg::WaitParams wait;
+
+      mission_planner::msg::GenericTaskParams generic;
+    };
+  };
+};

@@ -75,8 +75,8 @@ class Agent{
   public:
     //Constructors
     Agent();
-		Agent(Planner* planner, std::string id, std::string type, rclcpp::Time first_beacon_time,
-				mission_planner::msg::AgentBeacon first_beacon);
+	Agent(Planner* planner, std::string id, std::string type, rclcpp::Time first_beacon_time,
+		  mission_planner::msg::AgentBeacon first_beacon);
     Agent(const Agent& a);
     ~Agent();
 

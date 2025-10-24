@@ -1,0 +1,18 @@
+// generated from rosidl_adapter/resource/action.idl.em
+// with input from mission_planner/action/BatteryEnough.action
+// generated code does not contain a copyright notice
+
+
+module mission_planner {
+  module action {
+    struct BatteryEnough_Goal {
+      boolean value;
+    };
+    struct BatteryEnough_Result {
+      boolean ack;
+    };
+    struct BatteryEnough_Feedback {
+      string status;
+    };
+  };
+};

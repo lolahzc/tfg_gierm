@@ -1,0 +1,28 @@
+// generated from rosidl_adapter/resource/action.idl.em
+// with input from mission_planner/action/TaskResult.action
+// generated code does not contain a copyright notice
+
+#include "mission_planner/msg/DoCloserInspectionGoal.idl"
+#include "mission_planner/msg/Task.idl"
+
+module mission_planner {
+  module action {
+    @verbatim (language="comment", text=
+      "result 0 -> FAILURE" "\n"
+      "result 1 -> SUCCESS" "\n"
+      "result 2 -> HALTED")
+    struct TaskResult_Goal {
+      mission_planner::msg::Task task;
+
+      uint8 result;
+
+      mission_planner::msg::DoCloserInspectionGoal do_closer_inspection;
+    };
+    struct TaskResult_Result {
+      boolean ack;
+    };
+    struct TaskResult_Feedback {
+      string status;
+    };
+  };
+};
