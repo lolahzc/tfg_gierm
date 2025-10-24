@@ -1,0 +1,3 @@
+string[] ids
+geometry_msgs/Point[] xyz_coordinates
+geographic_msgs/GeoPose[] gps_coordinates
