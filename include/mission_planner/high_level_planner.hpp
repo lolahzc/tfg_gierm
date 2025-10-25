@@ -147,17 +147,24 @@ std::ostream& operator << (std::ostream& os, Agent& a){
   return os;
 }
 
-class Planner {
+class Planner : public rclcpp::Node {
   private:
-    //Node Handlers
-    rclcpp::Node nh_;
 
-	std::unique_ptr<rclcpp_action::Client<mission_planner::action::HeuristicPlanning>> hp_ac_;
-	// actionlib::SimpleActionClient<mission_planner::HeuristicPlanningAction> hp_ac_;
-	rclcpp_action::Server<mission_planner::action::NewTask> nt_as_;
+	rclcpp_action::Client<mission_planner::action::HeuristicPlanning>::SharedPtr hp_ac_;
+	rclcpp_action::Server<mission_planner::action::NewTask>::SharedPtr nt_as_;
 
-    mission_planner::action::NewTask_Feedback nt_feedback_;
-    mission_planner::action::NewTask_Result nt_result_;
+    rclcpp_action::GoalResponse handle_goal(
+        const rclcpp_action::GoalUUID & uuid,
+        std::shared_ptr<const mission_planner::action::NewTask::Goal> goal);
+
+    rclcpp_action::CancelResponse handle_cancel(
+        const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle);
+
+    void handle_accepted(
+        const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle);
+
+    void execute_incoming_task(
+        const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle);
 
     // Subscribers
     rclcpp::Subscription<mission_planner::msg::AgentBeacon>::SharedPtr beacon_sub_;
@@ -167,7 +174,7 @@ class Planner {
     // Publishers
 	rclcpp::Publisher<mission_planner::msg::PlannerBeacon>::SharedPtr beacon_pub_;
     mission_planner::msg::PlannerBeacon beacon_;
-    rclcpp::Rate beacon_rate_;
+    double beacon_rate_;
 
     std::string config_file;
 	std::string mission_id_;
@@ -194,14 +201,14 @@ class Planner {
 	Planner(mission_planner::msg::PlannerBeacon beacon);
     ~Planner(void);
 
-	bool checkTaskParams(const mission_planner::action::NewTask_Goal::ConstPtr& goal);
-
-    //New Tasks callback
-    void incomingTask(const mission_planner::action::NewTask_Goal::ConstPtr& goal);
+	bool checkTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal);
+    
+	//New Tasks callback
+    void incomingTask(const mission_planner::action::NewTask_Goal::SharedPtr goal);
 
     //Agent Beacon Handler
-    void beaconCallback(const mission_planner::msg::AgentBeacon::ConstPtr& beacon);
-	void missionOverCallback(const mission_planner::msg::MissionOver& value);
+    void beaconCallback(const mission_planner::msg::AgentBeacon::SharedPtr beacon);
+	void missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value);
 
     //Method to reassign all not finished tasks
     void performTaskAllocation();
@@ -209,7 +216,7 @@ class Planner {
 	//Pending Tasks methods
 	classes::Task* getPendingTask(std::string task_id);
 	void deletePendingTask(std::string task_id);
-	bool updateTaskParams(const mission_planner::action::NewTask_Goal::ConstPtr& goal);
+	bool updateTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal);
 	void checkBeaconsTimeout(rclcpp::Time now);
 	
 	//Getters

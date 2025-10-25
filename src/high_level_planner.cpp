@@ -1134,3 +1134,766 @@ void Agent::print(std::ostream& os)
 }
 
 // ---------------- Planner definitions ---------------- //
+Planner::Planner(mission_planner::msg::PlannerBeacon beacon) : 
+  rclcpp::Node("planner_node"),
+  beacon_rate_(1),
+  beacon_(beacon),
+  mission_over_(false),
+  recharge_task_(nullptr) 
+
+{
+    nt_as_ = rclcpp_action::create_server<mission_planner::action::NewTask>(
+      this,
+      "incoming_task_action",
+      std::bind(&Planner::handle_goal, this, std::placeholders::_1, std::placeholders::_2),
+      std::bind(&Planner::handle_cancel, this, std::placeholders::_1),
+      std::bind(&Planner::handle_accepted, this, std::placeholders::_1)
+    );
+
+    // Cargar posiciones conocidas y objetos humanos
+    std::string path = ament_index_cpp::get_package_share_directory("mission_planner");
+    declare_parameter<std::string>("config_file", path + "/config/conf.yaml");
+    get_parameter("config_file", config_file);
+
+    readConfigFile(config_file);
+
+    // Crear publishers y subscribers
+    beacon_pub_ = create_publisher<mission_planner::msg::PlannerBeacon>(
+      "/planner_beacon", 
+      10);
+    
+      beacon_sub_ = create_subscription<mission_planner::msg::AgentBeacon>(
+      "/agent_beacon", 
+      100,
+      std::bind(&Planner::beaconCallback, this, std::placeholders::_1));
+
+    mission_over_sub_ = create_subscription<mission_planner::msg::MissionOver>(
+      "/mission_over", 
+      1,
+      std::bind(&Planner::missionOverCallback, this, std::placeholders::_1));
+
+    RCLCPP_INFO(get_logger(), "Planner node initialized.");
+
+    recharge_task_ = new classes::Recharge("Recharge", 0.0, 1.0);
+
+    RCLCPP_INFO(get_logger(), "Waiting Matlab's heuristic planning action server to be available...");
+
+    hp_ac_ = rclcpp_action::create_client<mission_planner::action::HeuristicPlanning>(
+      this,
+      "/heuristic_planning");
+
+    rclcpp::Rate waiting_server_rate(std::chrono::seconds(1));
+    while(rclcpp::ok() && !isTopicAvailable("/heuristic_planning/status"))
+    {
+      waiting_server_rate.sleep();
+    }
+
+    RCLCPP_INFO(get_logger(), "[Planner] Entering main while loop...");
+
+    rclcpp::Rate beacon_rate(beacon_rate_);
+    while(rclcpp::ok() && !mission_over_) {
+      checkBeaconsTimeout(now());
+      beacon_.timestamp = now();
+      beacon_pub_->publish(beacon_);
+      rclcpp::spin_some(get_node_base_interface());
+      beacon_rate.sleep(); 
+    }
+
+    RCLCPP_INFO(this->get_logger(), "[Planner] Mission Over. Waiting for the agents to finish");
+    
+    while(rclcpp::ok() && !agent_map_.empty()) {
+      checkBeaconsTimeout(now());
+      rclcpp::spin_some(get_node_base_interface());
+      beacon_rate.sleep();
+    }
+
+    for(auto &task: pending_tasks_)
+      delete task.second;
+    pending_tasks_.clear();
+
+}
+
+Planner::~Planner(void){}
+
+
+rclcpp_action::GoalResponse Planner::handle_goal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const mission_planner::action::NewTask::Goal> goal)
+{
+    RCLCPP_INFO(get_logger(), "Received new task goal with ID: %s", goal->task.id.c_str());
+    (void)uuid;
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
+
+rclcpp_action::CancelResponse Planner::handle_cancel(
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle)
+{
+    RCLCPP_INFO(get_logger(), "Received request to cancel task");
+    (void)goal_handle;
+    return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void Planner::handle_accepted(
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle)
+{
+    // Ejecutar en un hilo separado para no bloquear el executor
+    std::thread{
+        [this, goal_handle]() {
+            this->execute_incoming_task(goal_handle);
+        }
+    }.detach();
+}
+
+void Planner::execute_incoming_task(
+    const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle)
+{
+    const auto goal = goal_handle->get_goal();
+    auto result = std::make_shared<mission_planner::action::NewTask::Result>();
+    auto feedback = std::make_shared<mission_planner::action::NewTask::Feedback>();
+
+    try {
+        // Publicar feedback inicial
+        feedback->status = "Reading the New Task";
+        goal_handle->publish_feedback(feedback);
+
+        // Procesar la tarea
+        std::string id = goal->task.id;
+        char type = goal->task.type;
+        char old_type;
+
+        // Check if the task params are correct
+        if(!checkTaskParams(goal))
+        {
+            RCLCPP_WARN(get_logger(), "[incomingTask] Incorrect task");
+            
+            auto task_itr = pending_tasks_.find(id);
+            if(task_itr != pending_tasks_.end())
+            {
+                old_type = task_itr->second->getType();
+                RCLCPP_INFO_STREAM(get_logger(), "[incomingTask] " << id << "(" << (
+                    old_type == 'M' ? "Monitor" : 
+                    old_type == 'I' ? "Inspect" :
+                    old_type == 'A' ? "InspectPVArray" :
+                    old_type == 'D' ? "DeliverTool" : 
+                    old_type == 'R' ? "Recharge" : 
+                    old_type == 'W' ? "Wait" : 
+                    "Task") << ") is going to be deleted");
+                
+                deletePendingTask(id);
+                performTaskAllocation();
+            }
+            
+            result->ack = false;
+            goal_handle->succeed(result);
+            return;
+        }
+
+        feedback->status = "Checking if the New Task already exists";
+        goal_handle->publish_feedback(feedback);
+
+        // Check if the new task already exist
+        auto task_itr = pending_tasks_.find(id);
+        if(task_itr != pending_tasks_.end())
+        {
+            old_type = task_itr->second->getType();
+            if(type == old_type)
+            {
+                if(!updateTaskParams(goal))
+                {
+                    result->ack = false;
+                    goal_handle->abort(result);
+                    return;
+                }
+                else
+                {
+                    RCLCPP_INFO(get_logger(), "[incomingTask] Task Params Updated. Allocating tasks...");
+                    feedback->status = "Allocating pending tasks";
+                    goal_handle->publish_feedback(feedback);
+                    performTaskAllocation();
+                    result->ack = true;
+                    goal_handle->succeed(result);
+                    return;
+                }
+            }
+            else
+            {
+                RCLCPP_WARN_STREAM(get_logger(), "[incomingTask] Duplicated ID. An unfinished task is going to be deleted: " << id << "(" << (
+                    old_type == 'M' ? "Monitor" : 
+                    old_type == 'F' ? "MonitorUGV" : 
+                    old_type == 'I' ? "Inspect" : 
+                    old_type == 'A' ? "InspectPVArray" : 
+                    old_type == 'D' ? "DeliverTool" : 
+                    old_type == 'R' ? "Recharge" : 
+                    old_type == 'W' ? "Wait" : 
+                    "Task") << ")");
+                deletePendingTask(id);
+            }
+        }
+
+        feedback->status = "Adding the New Task to pending_tasks_ map";
+        goal_handle->publish_feedback(feedback);
+
+        // Crear la nueva tarea
+        switch(goal->task.type)
+        {
+            case 'M':
+            case 'm':
+                pending_tasks_[id] = new classes::Monitor(id, &(human_targets_[goal->task.monitor.human_target_id]),
+                    goal->task.monitor.distance, goal->task.monitor.number);
+                monitor_tasks_.push_back(id);
+                break;
+            case 'F':
+            case 'f':
+                pending_tasks_[id] = new classes::MonitorUGV(id, goal->task.monitor_ugv.ugv_id, goal->task.monitor_ugv.height);
+                monitor_tasks_.push_back(id);
+                break;
+            case 'I':
+            case 'i':
+                pending_tasks_[id] = new classes::Inspect(id, goal->task.inspect.waypoints);
+                inspect_tasks_.push_back(id);
+                break;
+            case 'A':
+            case 'a':
+                pending_tasks_[id] = new classes::InspectPVArray(id, goal->task.inspect.waypoints);
+                inspect_tasks_.push_back(id);
+                break;
+            case 'D':
+            case 'd':
+                pending_tasks_[id] = new classes::DeliverTool(id, &(tools_[goal->task.deliver.tool_id]),
+                    &(human_targets_[goal->task.deliver.human_target_id]));
+                deliver_tasks_.push_back(id);
+                break;
+            default:
+                break;
+        }
+        
+        RCLCPP_INFO_STREAM(get_logger(), "[incomingTask] Received a New Task:\n" << *pending_tasks_[id]);
+        RCLCPP_INFO(get_logger(), "[incomingTask] Allocating tasks...");
+
+        feedback->status = "Allocating pending tasks";
+        goal_handle->publish_feedback(feedback);
+
+        performTaskAllocation();
+
+        // Verificar si se canceló la acción
+        if (goal_handle->is_canceling()) {
+            RCLCPP_INFO(get_logger(), "[incomingTask] Incoming Task: Preempted");
+            result->ack = false;
+            goal_handle->canceled(result);
+            return;
+        }
+
+        result->ack = true;
+        goal_handle->succeed(result);
+
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(get_logger(), "Exception in execute_incoming_task: %s", e.what());
+        result->ack = false;
+        goal_handle->abort(result);
+    }
+}
+
+void Planner::readConfigFile(std::string config_file)
+{
+  YAML::Node yaml_config = YAML::LoadFile(config_file);
+
+  if(yaml_config["mission_id"])
+    mission_id_ = yaml_config["mission_id"].as<std::string>();
+
+  if(yaml_config["positions"])
+  {
+    for(auto const& group: yaml_config["positions"])
+    {
+      for(auto const& position: group.second)
+      {
+        known_positions_[group.first.as<std::string>()][position.first.as<std::string>()] = 
+          classes::Position(
+            position.first.as<std::string>(),
+            position.second["x"].as<float>(),
+            position.second["y"].as<float>(),
+            position.second["z"].as<float>());
+      }
+    }
+  }
+
+  if(yaml_config["human_targets"])
+  {
+    for(auto const& human_target: yaml_config["human_targets"])
+    {
+      human_targets_[human_target.first.as<std::string>()] = 
+        classes::HumanTarget(
+          human_target.first.as<std::string>(),
+          human_target.second["x"].as<float>(),
+          human_target.second["y"].as<float>(),
+          human_target.second["z"].as<float>());
+    }
+  }
+
+  if(yaml_config["tools"])
+  {
+    for(auto const& tool: yaml_config["tools"])
+    {
+      tools_[tool.first.as<std::string>()] = 
+        classes::Tool(
+          tool.first.as<std::string>(),
+          tool.second["weight"].as<float>(),
+          tool.second["x"].as<float>(),
+          tool.second["y"].as<float>(),
+          tool.second["z"].as<float>());
+    }
+  }
+}
+
+bool Planner::checkTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal)
+{
+  std::map <std::string, classes::HumanTarget>::iterator human_itr;
+  std::map <std::string, classes::Position>::iterator position_itr;
+  std::map <std::string, classes::Tool>::iterator tool_itr;
+
+  switch(goal->task.type)
+  {
+    case 'M': case 'm':
+      human_itr = human_targets_.find(goal->task.monitor.human_target_id);
+      if(human_itr == human_targets_.end())
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: unknown human target ID"); 
+        return false;
+      }
+      if(goal->task.monitor.distance == 0)
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: monitor distance cannot be zero"); 
+        return false;
+      }
+      if(goal->task.monitor.number == 0)
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: number of monitors cannot be zero"); 
+        return false;
+      }
+      break;
+
+    case 'F': case 'f':
+      if(goal->task.monitor_ugv.ugv_id == "")
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: unknown UGV ID"); 
+        return false;
+      }
+      if(goal->task.monitor_ugv.height == 0)
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: monitor height cannot be zero"); 
+        return false;
+      }
+      break;
+
+    case 'I': case 'i':
+      if(goal->task.inspect.waypoints.size() == 0)
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: no inspect waypoints provided"); 
+        return false;
+      }
+      break;
+
+    case 'A' : case 'a':
+      if(goal->task.inspect.waypoints.size() != 2)
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: there has to be 2 waypoints");
+        return false;
+      }
+      break;
+
+    case 'D': case 'd':
+      human_itr = human_targets_.find(goal->task.deliver.human_target_id);
+      if(human_itr == human_targets_.end())
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: unknown human target ID"); 
+        return false;
+      }
+      tool_itr = tools_.find(goal->task.deliver.tool_id);
+      if(tool_itr == tools_.end())
+      {
+        RCLCPP_INFO(get_logger(), "[CheckTaskParams] Invalid task: unknown tool ID"); 
+        return false;
+      }
+      break;
+
+      default:
+        return false;
+        break;
+  
+    }
+  
+    return true;
+
+}
+
+void Planner::beaconCallback(const mission_planner::msg::AgentBeacon::SharedPtr beacon)
+{
+  auto agent_itr = agent_map_.find(beacon->id);
+  if(agent_itr == agent_map_.end())
+  {
+    RCLCPP_INFO(get_logger(), "[beaconCallback] New Agent connected: %s", beacon->id.c_str());
+    Agent agent(this, beacon->id, beacon->type, now(), *beacon);
+    agent_map_.emplace(beacon->id, agent);
+
+    if(beacon->type == "PhysicalACW")
+      deliver_agents_.push_back(beacon->id);
+    else if(beacon->type == "InspectionACW")
+      inspect_agents_.push_back(beacon->id);
+    else if(beacon->type == "SafetyACW")
+      monitor_agents_.push_back(beacon->id);
+
+    performTaskAllocation();
+
+  }
+
+  else
+  {
+    agent_map_[beacon->id].setLastBeaconTime(now());
+
+    if(!beacon->timeout && agent_map_[beacon->id].getLastBeaconTimeout())
+      RCLCPP_WARN_STREAM(get_logger(), "[beaconCallback] (" << beacon->id << ") Disconnected briefly, activated the emergency " 
+          << "protocol by emptying its task queue and reconnected without Planner noticing");
+      agent_map_[beacon->id].sendQueueToAgent();
+
+  }
+
+  agent_map_[beacon->id].setLastBeacon(*beacon);
+
+}
+
+void Planner::missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value)
+{
+  mission_over_ = value->value;
+}
+
+void Planner::performTaskAllocation()
+{
+  RCLCPP_INFO(get_logger(), "[performTaskAllocation] Waiting for Heuristic Planning action server to be available...");
+
+  if (!hp_ac_->wait_for_action_server(std::chrono::seconds(1))) 
+  {
+    RCLCPP_WARN(get_logger(), "[performTaskAllocation] Heuristic planning action server not available");
+    return;
+  }
+
+  auto goal = mission_planner::action::HeuristicPlanning::Goal();
+  
+  for(auto &agent : agent_map_)
+  {
+    if(agent.second.getBattery() > 0.3)
+    {
+      goal.available_agents.push_back(agent.first);
+    }  
+  }
+
+  for(auto &task : pending_tasks_)
+  {
+    goal.remaining_tasks.push_back(task.first);
+  }
+
+  RCLCPP_INFO(get_logger(), "[performTaskAllocation] Requesting a task allocation...");
+
+  auto future_goal_handle = hp_ac_->async_send_goal(goal);
+
+  if(rclcpp::spin_until_future_complete(this->get_node_base_interface(), future_goal_handle, std::chrono::seconds(10)) == rclcpp::FutureReturnCode::SUCCESS)
+  {
+    auto goal_handle = future_goal_handle.get();
+    if(goal_handle)
+    {
+      auto future_result = hp_ac_->async_get_result(goal_handle);
+
+      if(rclcpp::spin_until_future_complete(this->get_node_base_interface(), future_result, std::chrono::seconds(10)) == rclcpp::FutureReturnCode::SUCCESS)
+      {
+        auto result = future_result.get();
+
+        if(result.result->success)
+        {
+          for(auto &agent : agent_map_)
+          {
+            agent.second.setOldTaskQueue();
+            agent.second.emptyTheQueue();
+          }
+
+          for(auto &queue : result.result->planning_result)
+          {
+            auto agent = queue.agent_id;
+            for(auto &task : queue.queue)
+            {
+              if(task.id == "t_R")
+              {
+                agent_map_[agent].addTaskToQueue(recharge_task_);
+              }
+              else
+              {
+                agent_map_[agent].addTaskToQueue(pending_tasks_[task.id]);
+              }
+            }
+          }
+
+          RCLCPP_INFO(get_logger(), "[performTaskAllocation] Tasks Allocated:");
+          for(auto &agent : agent_map_)
+          {
+            RCLCPP_INFO_STREAM(get_logger(), "[performTaskAllocation] " << agent.second);
+          }
+
+          for(auto &agent : agent_map_)
+          {
+            agent.second.sendQueueToAgent();
+          }
+
+          for(auto &agent : agent_map_)
+          {
+            agent.second.deleteOldTaskQueue();
+          }
+
+        }
+        else
+        {
+          RCLCPP_WARN(get_logger(), "[performTaskAllocation] Task planning failed. %lu agents connected. %lu pending tasks", 
+                      agent_map_.size(), pending_tasks_.size());
+        }
+
+      }
+      else
+      {
+        RCLCPP_WARN(get_logger(), "[performTaskAllocation] Timeout waiting for result");
+      }
+
+    }
+
+    else
+    {
+      RCLCPP_WARN(get_logger(), "[performTaskAllocation] Goal was rejected by server");
+    }
+
+  }
+
+  else
+  {
+    RCLCPP_WARN(get_logger(), "[performTaskAllocation] Timeout reached");
+  }
+  return;
+}
+
+classes::Task* Planner::getPendingTask(std::string task_id)
+{
+    std::map<std::string, classes::Task*>::iterator task_itr = pending_tasks_.find(task_id);
+    if(task_itr != pending_tasks_.end())
+        return task_itr->second;
+    else
+        return nullptr;
+}
+
+void Planner::deletePendingTask(std::string task_id)
+{
+  // Check if the task exists
+  auto task_itr = pending_tasks_.find(task_id);
+  if(task_itr != pending_tasks_.end())
+  {
+      char type = task_itr->second->getType();
+      // Delete task from type_task_queue
+      switch(type)
+      {
+          case 'M':
+          case 'm':
+          case 'F':
+          case 'f':
+              monitor_tasks_.erase(std::find(monitor_tasks_.begin(), monitor_tasks_.end(), task_itr->second->getID()));
+              break;
+          case 'I':
+          case 'i':
+              inspect_tasks_.erase(std::find(inspect_tasks_.begin(), inspect_tasks_.end(), task_itr->second->getID()));
+              break;
+          case 'A':
+          case 'a':
+              inspect_tasks_.erase(std::find(inspect_tasks_.begin(), inspect_tasks_.end(), task_itr->second->getID()));
+              break;
+          case 'D':
+          case 'd':
+              deliver_tasks_.erase(std::find(deliver_tasks_.begin(), deliver_tasks_.end(), task_itr->second->getID()));
+              break;
+          default:
+              break;
+      }
+      // Delete task from agents_queue (because old_task_queue will use the pointer)
+      if(!agent_map_.empty()) {
+          for(auto &agent: agent_map_) {
+              agent.second.replaceTaskFromQueue(task_id);
+          }
+      }
+      // Delete task pointer
+      delete task_itr->second;
+      pending_tasks_.erase(task_itr);
+  }
+  return;
+}
+
+
+bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal)
+{
+    classes::Task* aux = nullptr;
+
+    std::string id = goal->task.id;
+    char type = goal->task.type;
+
+    std::string m_human_target_id;
+    float distance;
+    int number;
+    std::string d_tool_id;
+    std::string d_human_target_id;
+
+    // Check if the task exists
+    auto task_itr = pending_tasks_.find(id);
+    if(task_itr != pending_tasks_.end())
+    {
+        switch(type)
+        {
+            case 'M':
+            case 'm':
+                m_human_target_id = goal->task.monitor.human_target_id;
+                distance = goal->task.monitor.distance;
+                number = goal->task.monitor.number;
+
+                auto human_itr = human_targets_.find(m_human_target_id);
+                if(human_itr == human_targets_.end())
+                {
+                    RCLCPP_INFO(get_logger(), "[updateTaskParams] Invalid task: unknown human target ID");
+                    return false;
+                }
+                aux = new classes::Monitor(id, &(human_targets_[m_human_target_id]), distance, number);
+                task_itr->second->updateParams(aux);
+                break;
+            case 'F':
+            case 'f':
+                aux = new classes::MonitorUGV(id, goal->task.monitor_ugv.ugv_id, goal->task.monitor_ugv.height);
+                task_itr->second->updateParams(aux);
+                break;
+            case 'I':
+            case 'i':
+                aux = new classes::Inspect(id, goal->task.inspect.waypoints);
+                task_itr->second->updateParams(aux);
+                break;
+            case 'A':
+            case 'a':
+                aux = new classes::InspectPVArray(id, goal->task.inspect.waypoints);
+                task_itr->second->updateParams(aux);
+                break;
+            case 'D':
+            case 'd':
+                d_tool_id = goal->task.deliver.tool_id;
+                d_human_target_id = goal->task.deliver.human_target_id;
+
+                auto human_itr_d = human_targets_.find(d_human_target_id);
+                if(human_itr_d == human_targets_.end())
+                {
+                    RCLCPP_INFO(get_logger(), "[updateTaskParams] Invalid task: unknown human target ID");
+                    return false;
+                }
+                auto tool_itr = tools_.find(d_tool_id);
+                if(tool_itr == tools_.end())
+                {
+                    RCLCPP_INFO(get_logger(), "[updateTaskParams] Invalid task: unknown tool ID");
+                    return false;
+                }
+                aux = new classes::DeliverTool(id, &(tools_[d_tool_id]), &(human_targets_[d_human_target_id]));
+                task_itr->second->updateParams(aux);
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Solo eliminar aux si fue asignado
+    if (aux != nullptr) {
+        delete aux;
+    }
+
+    return true;
+}
+
+void Planner::checkBeaconsTimeout(rclcpp::Time now)
+{
+    // Delete disconnected Agent from agent_map_ and from the corresponding type_agents_ vector, and send them an empty
+    // task just in case they still listen to this block
+    std::queue <std::string> disconnected_agents;
+    auto prev_size = agent_map_.size();
+    std::string type;
+    std::string id;
+
+    if(!agent_map_.empty())
+    {
+        for(auto &agent: agent_map_) {
+            if(agent.second.checkBeaconTimeout(now)) {
+                disconnected_agents.push(agent.first);
+            }
+        }
+
+        while(!disconnected_agents.empty())
+        {
+            id = disconnected_agents.front();
+            RCLCPP_WARN_STREAM(get_logger(), "[checkBeaconsTimeout] Beacon Timeout. " << id << " disconnected.");
+
+            // Erase disconnected UAV from agent type corresponding list
+            type = agent_map_[id].getType();
+            if(type == "PhysicalACW") {
+                deliver_agents_.erase(std::find(deliver_agents_.begin(), deliver_agents_.end(), id));
+            } else if(type == "InspectionACW") {
+                inspect_agents_.erase(std::find(inspect_agents_.begin(), inspect_agents_.end(), id));
+            } else if(type == "SafetyACW") {
+                monitor_agents_.erase(std::find(monitor_agents_.begin(), monitor_agents_.end(), id));
+            }
+
+            // Send to the disconnected UAV an empty queue just in case
+            RCLCPP_WARN_STREAM(get_logger(), "[checkBeaconsTimeout] Sending " << id << " an empty queue just in case");
+            agent_map_[id].emptyTheQueue();
+            agent_map_[id].sendQueueToAgent();
+
+            // Erase it from memory
+            agent_map_.erase(id);
+            disconnected_agents.pop();
+        }
+
+        if(agent_map_.size() != prev_size)
+        {
+            RCLCPP_INFO_STREAM(get_logger(), "[checkBeaconsTimeout] Connected Agents: " << agent_map_.size() << ". Perform Task Allocation:");
+            performTaskAllocation();
+        }
+    }
+
+    return;
+}
+
+
+// Getters
+bool Planner::getMissionOver() { return mission_over_; }
+
+// Others
+bool Planner::isTopicAvailable(const std::string &topic_name)
+{
+    auto topics = this->get_topic_names_and_types();
+    
+    for (const auto &topic : topics) {
+        if (topic.first == topic_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
+int main(int argc, char **argv)
+{
+    rclcpp::init(argc, argv);
+    
+    mission_planner::msg::PlannerBeacon beacon;
+    auto planner = std::make_shared<Planner>(beacon);
+    
+    RCLCPP_INFO(planner->get_logger(), "[main] Starting high_level_planner...");
+    
+    // ROS2 usa executors en lugar de spin en el main
+    rclcpp::spin(planner);
+    
+    RCLCPP_INFO(planner->get_logger(), "[main] Ending...");
+    rclcpp::shutdown();
+    
+    return 0;
+}
