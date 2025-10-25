@@ -1,4 +1,7 @@
-DoCloserInspectionGoal goal
+# Goal
+string[] ids
+geometry_msgs/Point[] xyz_coordinates
+geographic_msgs/GeoPoint[] gps_coordinates
 ---
 bool success
 string message

@@ -32,6 +32,7 @@
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "sensor_msgs/msg/battery_state.hpp"
+#include "geographic_msgs/msg/geo_point.hpp"
 #include "as2_msgs/msg/pose_stamped_with_id.hpp" // No se si lo queremos con/sin ID
 
 //Forward declarations
@@ -67,10 +68,30 @@ class Agent{
 	rclcpp_action::Server<mission_planner::action::BatteryEnough>::SharedPtr battery_as_;
     rclcpp_action::Server<mission_planner::action::TaskResult>::SharedPtr task_result_as_;
 	
+	rclcpp_action::Client<mission_planner::action::DoCloserInspection>::SharedPtr do_closer_inspection_ac_;
+
+	rclcpp_action::GoalResponse handleBatteryEnoughGoal(
+	  const rclcpp_action::GoalUUID & uuid,
+	  std::shared_ptr<const mission_planner::action::BatteryEnough::Goal> goal);
+
+	rclcpp_action::CancelResponse handleBatteryEnoughCancel(
+	  const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle);
+
+	void handleBatteryEnoughAccepted(
+	  const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle);
+
     bool battery_enough_;
-	
-    mission_planner::action::BatteryEnough::Feedback battery_feedback_;
-	mission_planner::action::BatteryEnough::Result battery_result_;
+
+	rclcpp_action::GoalResponse handleTaskResultGoal(
+		const rclcpp_action::GoalUUID & uuid,
+		std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal);
+
+	rclcpp_action::CancelResponse handleTaskResultCancel(
+		std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle);
+
+	void handleTaskResultAccepted(
+		std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle);	
+
 
   public:
     //Constructors
@@ -114,8 +135,8 @@ class Agent{
 	//Callbacks
     void positionCallbackAS2(const geometry_msgs::msg::PoseStamped& pose);
     void batteryCallback(const sensor_msgs::msg::BatteryState& battery);
-	void batteryEnoughCB(const mission_planner::action::BatteryEnough_Goal::ConstPtr& goal);
-	void taskResultCB(const mission_planner::action::TaskResult_Goal::ConstPtr& goal);
+	//void batteryEnoughCB(const mission_planner::action::BatteryEnough_Goal::ConstPtr& goal);
+	//void taskResultCB(const mission_planner::action::TaskResult_Goal::ConstPtr& goal);
 
     //Visualization method
     void print(std::ostream& os);

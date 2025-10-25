@@ -1,5 +1,5 @@
 #include "mission_planner/high_level_planner.hpp"
-#include <functional>
+
 
 using std::placeholders::_1;
 
@@ -51,15 +51,26 @@ Agent::Agent(Planner* planner,
   // Crear clientes y servidores de acciones
   ntl_ac_ = rclcpp_action::create_client<mission_planner::action::NewTaskList>(nh_, "/" + id_ + "/task_list");
 
-  battery_as_ = rclcpp_action::create_server<mission_planner::action::BatteryEnough>(nh_, "/" + id_ + "/battery_enough",
-                      std::bind(&Agent::batteryEnoughCB, this, _1),
-                      nullptr,
-                      nullptr);
+  battery_as_ = rclcpp_action::create_server<mission_planner::action::BatteryEnough>(
+      nh_, 
+      "/" + id_ + "/battery_enough",
+      std::bind(&Agent::handleBatteryEnoughGoal, this, std::placeholders::_1, std::placeholders::_2),
+      std::bind(&Agent::handleBatteryEnoughCancel, this, std::placeholders::_1),
+      std::bind(&Agent::handleBatteryEnoughAccepted, this, std::placeholders::_1));
 
-  task_result_as_ = rclcpp_action::create_server<mission_planner::action::TaskResult>(nh_, "/" + id_ + "/task_result",
-                      std::bind(&Agent::taskResultCB, this, _1),
-                      nullptr,
-                      nullptr);
+  task_result_as_ = rclcpp_action::create_server<mission_planner::action::TaskResult>(
+      nh_, 
+      "/" + id_ + "/task_result",
+      [this](const rclcpp_action::GoalUUID & uuid, 
+            std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal) {
+          return this->handleTaskResultGoal(uuid, goal);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle) {
+          return this->handleTaskResultCancel(goal_handle);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle) {
+          this->handleTaskResultAccepted(goal_handle);
+      });
 
   RCLCPP_INFO(nh_->get_logger(), "Agente [%s] de tipo [%s] inicializado (ROS2).", id_.c_str(), type_.c_str());                    
 }
@@ -75,43 +86,57 @@ Agent::Agent(const Agent& a)
   battery_(a.battery_),
   battery_enough_(a.battery_enough_),
   pose_topic_(a.pose_topic_),
-  battery_topic_(a.battery_topic_)
+  battery_topic_(a.battery_topic_),
+  old_first_task_id_(a.old_first_task_id_)
 {
-
   nh_ = rclcpp::Node::make_shared("agent_copy_" + id_);
 
   // Recrear suscriptores
   position_sub_ = nh_->create_subscription<as2_msgs::msg::PoseStampedWithID>(
       "/" + id_ + pose_topic_,
       10,
-      std::bind(&Agent::positionCallbackAS2, this, _1));
+      std::bind(&Agent::positionCallbackAS2, this, std::placeholders::_1));
 
   battery_sub_ = nh_->create_subscription<sensor_msgs::msg::BatteryState>(
       "/" + id_ + battery_topic_,
       10,
-      std::bind(&Agent::batteryCallback, this, _1));
+      std::bind(&Agent::batteryCallback, this, std::placeholders::_1));
 
-  // Recrear acciones
+  // Recrear acciones - CLIENTES
   ntl_ac_ = rclcpp_action::create_client<mission_planner::action::NewTaskList>(
       nh_,
       "/" + id_ + "/task_list");
 
+  // Recrear acciones - SERVIDORES con las nuevas funciones
   battery_as_ = rclcpp_action::create_server<mission_planner::action::BatteryEnough>(
       nh_,
       "/" + id_ + "/battery_enough",
-      std::bind(&Agent::batteryEnoughCB, this, _1),
-      nullptr,
-      nullptr);
+      [this](const rclcpp_action::GoalUUID & uuid, 
+             std::shared_ptr<const mission_planner::action::BatteryEnough::Goal> goal) {
+          return this->handleBatteryEnoughGoal(uuid, goal);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle) {
+          return this->handleBatteryEnoughCancel(goal_handle);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle) {
+          this->handleBatteryEnoughAccepted(goal_handle);
+      });
 
   task_result_as_ = rclcpp_action::create_server<mission_planner::action::TaskResult>(
       nh_,
       "/" + id_ + "/task_result",
-      std::bind(&Agent::taskResultCB, this, _1),
-      nullptr,
-      nullptr);
+      [this](const rclcpp_action::GoalUUID & uuid, 
+             std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal) {
+          return this->handleTaskResultGoal(uuid, goal);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle) {
+          return this->handleTaskResultCancel(goal_handle);
+      },
+      [this](std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle) {
+          this->handleTaskResultAccepted(goal_handle);
+      });
 
   RCLCPP_INFO(nh_->get_logger(), "Copia del agente [%s] creada.", id_.c_str());
-
 }
 
 // DESTRUCTOR
@@ -127,7 +152,7 @@ Agent::~Agent()
 
 void Agent::updateSensorsInformation(){}
 
-bool::Agent::isBatteryForQueue()
+bool Agent::isBatteryForQueue()
 {
   return true;
 }
@@ -144,7 +169,7 @@ bool Agent::isBatteryEnough(classes::Task* task)
 
 bool Agent::checkBeaconTimeout(rclcpp::Time now)
 {
-  rclcpp::Duration timeout(5.0);
+  auto timeout = rclcpp::Duration::from_seconds(5.0);
   if ((now - last_beacon_time_) > timeout)
     return true;
   else 
@@ -229,7 +254,7 @@ int Agent::getQueueSize()
 
 void Agent::sendQueueToAgent()
 {
-  ntl_ac_.wait_for_action_server(rclcpp::Duration::from_seconds(5.0));
+  ntl_ac_ -> wait_for_action_server(std::chrono::seconds(5));
   mission_planner::action::NewTaskList::Goal goal;
 
   goal.agent_id = id_;
@@ -291,7 +316,7 @@ void Agent::sendQueueToAgent()
 
   }
 
-  ntl_ac_.send_goal(goal);
+  ntl_ac_ -> async_send_goal(goal);
 
 }
 
@@ -406,7 +431,7 @@ float Agent::computeTaskCost(classes::Task* task)
     {
       case 'M' : case 'm':
         human_position = task->getHumanPosition();
-        traveling_cost = distance(position_, human_position);
+        traveling_cost = classes::distance(position_, human_position);
         break;
 
       case 'F' : case 'f':
@@ -730,31 +755,382 @@ float Agent::computeTaskCost(classes::Task* task)
     {
       switch(old_first_task->getType())
       {
-        
+        case 'M' : case 'm':
+        case 'F' : case 'f':
+          switch(task -> getType())
+          {
+            case 'M' : case 'm':
+            case 'F' : case 'f':
+              interruption_cost = 1;
+              break;
 
+            case 'I' : case 'i':
+              interruption_cost = 1;
 
+            case 'A' : case 'a':
+              interruption_cost = 0;
+              break;
+            
+            case 'D' : case 'd':
+              interruption_cost = 0;
 
-        
-      }
+            default:
+              interruption_cost = 0;
+              break;
+          }
+          break;
 
+        case 'I' : case 'i':
+          switch(task -> getType())
+          {
+            case 'M' : case 'm':
+            case 'F' : case 'f':
+              interruption_cost = 2;
+              break;
 
+            case 'I' : case 'i':
+              interruption_cost = 1;
 
+            case 'A' : case 'a':
+              interruption_cost = 1;
+              break;
+            
+            case 'D' : case 'd':
+              interruption_cost = 0;
 
+            default:
+              interruption_cost = 0;
+              break;
+          }
+          break;
 
+        case 'A' : case 'a':
+          switch(task -> getType())
+          {
+            case 'M' : case 'm':
+            case 'F' : case 'f':
+              interruption_cost = 2;
+              break;
+            
+            case 'I' : case 'i':
+              interruption_cost = 1;
+              break;
 
+            case 'A' : case 'a':
+              interruption_cost = 1;
+              break;
 
+            case 'D' : case 'd':
+              interruption_cost = 0;
+              break;
+            
+            default:
+              interruption_cost = 0;
+              break;
 
+            }
+            break;
+
+        case 'D' : case 'd':
+          switch(task -> getType())
+          {
+            case 'M' : case 'm':
+            case 'F' : case 'f':
+              interruption_cost = 3;
+              break;
+            
+            case 'I' : case 'i':
+              interruption_cost = 2;
+              break;
+
+            case 'A' : case 'a':
+              interruption_cost = 2;
+              break;
+
+            case 'D' : case 'd':
+              interruption_cost = 1;
+              break;
+            
+            default:
+              interruption_cost = 0;
+              break;
+            }
+            break;
+
+          }
     }
-
-
-
-
   }
 
+  else
+    interruption_cost = 0;
 
-
-
-
-
-
+return a * agent_type_cost + t * traveling_cost + i * interruption_cost;
+// return a * agent_type_cost + t * traveling_cost + b * battery_cost + i * interruption_cost;
 }
+
+
+// ---------------- Class Agent Getters ---------------- //
+
+std::string  Agent::getID()
+{
+  return id_;
+}
+
+std::string Agent::getType()
+{
+  return type_;
+}
+
+float Agent::getBattery()
+{
+  return battery_;
+}
+
+bool Agent::getLastBeaconTimeout()
+{
+  return last_beacon_.timeout;
+}
+
+// ---------------- Class Agent Setters ---------------- //
+
+void Agent::setLastBeaconTime(rclcpp::Time last_beacon_time)
+{
+  last_beacon_time_ = last_beacon_time;
+}
+
+void Agent::setLastBeacon(mission_planner::msg::AgentBeacon last_beacon)
+{
+  last_beacon_ = last_beacon;
+}
+
+// ---------------- Class Agent Callbacks ---------------- //
+void Agent::positionCallbackAS2(const geometry_msgs::msg::PoseStamped& pose)
+{
+  position_.update(pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
+}
+
+void Agent::batteryCallback(const sensor_msgs::msg::BatteryState& battery)
+{
+  battery_ = battery.percentage;
+}
+
+rclcpp_action::GoalResponse Agent::handleBatteryEnoughGoal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const mission_planner::action::BatteryEnough::Goal> goal)
+{
+  RCLCPP_INFO(nh_->get_logger(), "Received battery enough goal for agent %s", id_.c_str());
+  (void)uuid;
+  return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
+
+rclcpp_action::CancelResponse Agent::handleBatteryEnoughCancel(
+    std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle)
+{
+  RCLCPP_INFO(nh_->get_logger(), "Received request to cancel battery enough goal for agent %s", id_.c_str());
+  (void)goal_handle;
+  return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void Agent::handleBatteryEnoughAccepted(std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle)
+{
+  // Ejecutar en un hilo separado para no bloquear el executor
+  std::thread{
+    [this, goal_handle]() {
+      const auto goal = goal_handle->get_goal();
+      battery_enough_ = goal->value;
+      
+      RCLCPP_WARN(nh_->get_logger(), "Agent %s noticed that battery_enough_ = %s", 
+                  id_.c_str(), (battery_enough_ ? "true" : "false"));
+      
+      // Publicar feedback (forma correcta en ROS2)
+      auto feedback = std::make_shared<mission_planner::action::BatteryEnough::Feedback>();
+      feedback->status = "battery_enough_ updated";
+      goal_handle->publish_feedback(feedback);
+      
+      // Verificar si la acción fue cancelada
+      if (goal_handle->is_canceling()) {
+        auto result = std::make_shared<mission_planner::action::BatteryEnough::Result>();
+        result->ack = false;
+        goal_handle->canceled(result);
+        RCLCPP_INFO(nh_->get_logger(), "BatteryEnough goal canceled for agent %s", id_.c_str());
+        return;
+      }
+      
+      // Completar la acción exitosamente
+      auto result = std::make_shared<mission_planner::action::BatteryEnough::Result>();
+      result->ack = true;
+      goal_handle->succeed(result);
+      
+      RCLCPP_INFO(nh_->get_logger(), "BatteryEnough goal succeeded for agent %s", id_.c_str());
+      
+      planner_->performTaskAllocation();
+    }
+  }.detach();
+}
+
+rclcpp_action::GoalResponse Agent::handleTaskResultGoal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal)
+{
+    RCLCPP_INFO(nh_->get_logger(), "Received task result goal for agent %s, task ID: %s", 
+                id_.c_str(), goal->task.id.c_str());
+    (void)uuid;
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
+
+rclcpp_action::CancelResponse Agent::handleTaskResultCancel(
+    std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle)
+{
+    RCLCPP_INFO(nh_->get_logger(), "Received request to cancel task result goal for agent %s", id_.c_str());
+    (void)goal_handle;
+    return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void Agent::handleTaskResultAccepted(
+    std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle)
+{
+    std::thread{
+        [this, goal_handle]() {
+            const auto goal = goal_handle->get_goal();
+            auto result = std::make_shared<mission_planner::action::TaskResult::Result>();
+            result->ack = true;
+            
+            classes::Task* task = planner_->getPendingTask(goal->task.id);
+            char task_type;
+            
+            if(planner_->getMissionOver())
+            {
+                if(task) {
+                    task_type = task->getType();
+                    RCLCPP_INFO(nh_->get_logger(), "Task %s halted because mission is over", goal->task.id.c_str());
+                }
+                goal_handle->succeed(result);
+                return;
+            }
+
+            if(task == nullptr)
+            {
+                RCLCPP_INFO(nh_->get_logger(), "An already deleted Multi-UAV task ended");
+                goal_handle->succeed(result);
+                return;
+            }
+
+            // Check if task still exists
+            task_type = task->getType();
+
+            if(goal->task.type != task_type)
+            {
+                RCLCPP_INFO(nh_->get_logger(), "Task %s already deleted or modified. Ignoring result.", goal->task.id.c_str());
+                goal_handle->succeed(result);
+                return;
+            }
+
+            // Publicar feedback
+            auto feedback = std::make_shared<mission_planner::action::TaskResult::Feedback>();
+            feedback->status = "Processing task result";
+            goal_handle->publish_feedback(feedback);
+
+            // If task has been HALTED by the task queue manager as scheduled
+            if(goal->result == 2)
+            {
+                if(task_queue_.front() == task)
+                    task_queue_.pop();
+
+                planner_->deletePendingTask(goal->task.id);
+                planner_->performTaskAllocation();
+            }
+            // If task ended with SUCCESS
+            else if(goal->result == 1)
+            {
+                if(task_queue_.front() == task)
+                    task_queue_.pop();
+
+                planner_->deletePendingTask(goal->task.id);
+                planner_->performTaskAllocation();
+            }
+            // If task ended with FAILURE 
+            else if(goal->result == 0)
+            {
+                // Check if task has been halted because of not having battery enough
+                if(!battery_enough_)
+                {
+                    RCLCPP_WARN(nh_->get_logger(), "Battery not enough for agent: %s. Replanning...", id_.c_str());
+                }
+                else if(battery_ < 0.3)
+                {
+                    RCLCPP_WARN(nh_->get_logger(), "Task %s in %s FAILED due to low battery", goal->task.id.c_str(), id_.c_str());
+                }
+                else if(task == task_queue_.front())
+                {
+                    RCLCPP_INFO(nh_->get_logger(), "Task %s FAILED. Replanning...", goal->task.id.c_str());
+                    task_queue_.pop();
+                    planner_->deletePendingTask(goal->task.id);
+                    planner_->performTaskAllocation();
+                }
+                else
+                {
+                    RCLCPP_INFO(nh_->get_logger(), "Task %s FAILED. But it is not the first in the queue, so it was probably postponed. Ignoring...", goal->task.id.c_str());
+                }
+            }
+
+            // Request Closer Inspection if needed
+            if(!goal->do_closer_inspection.xyz_coordinates.empty() || !goal->do_closer_inspection.gps_coordinates.empty())
+            {
+                auto do_closer_inspection_ac = rclcpp_action::create_client<mission_planner::action::DoCloserInspection>(
+                    nh_, "/atrvjr/cooperation_use/do_closer_inspection");
+                
+                if(do_closer_inspection_ac->wait_for_action_server(std::chrono::seconds(1)))
+                {
+                    auto inspection_msg = mission_planner::action::DoCloserInspection::Goal();
+                    
+                    // CORRECCIÓN: Acceder directamente a los campos del goal y convertir tipos
+                    inspection_msg.ids = goal->do_closer_inspection.ids;
+                    inspection_msg.xyz_coordinates = goal->do_closer_inspection.xyz_coordinates;
+                    
+                    // CORRECCIÓN: Convertir GeoPose a GeoPoint
+                    inspection_msg.gps_coordinates.clear();
+                    for (const auto& geo_pose : goal->do_closer_inspection.gps_coordinates) {
+                        inspection_msg.gps_coordinates.push_back(geo_pose.position);
+                    }
+                    
+                    do_closer_inspection_ac->async_send_goal(inspection_msg);
+                    
+                    RCLCPP_INFO(nh_->get_logger(), "Sent closer inspection request with %zu coordinates", 
+                              goal->do_closer_inspection.xyz_coordinates.size());
+                }
+            }
+
+            // Finalizar la acción
+            goal_handle->succeed(result);
+        }
+    }.detach();
+}
+
+
+// ---------------- Class Agent Visualization Method ---------------- //
+void Agent::print(std::ostream& os)
+{
+  os << "Agent ID:" << id_;
+  classes::Task* tmp;
+  char task_type;
+  auto queue_size = task_queue_.size();
+
+  for(int i = 0; i < queue_size; i++)
+  {
+    tmp = task_queue_.front();
+    task_type = tmp->getType();
+    os << "\n\t" << tmp->getID() << ": " << (
+        task_type == 'M' ? "Monitor" : 
+        task_type == 'F' ? "MonitorUGV" : 
+        task_type == 'I' ? "Inspect" : 
+        task_type == 'A' ? "InspectPVArray" : 
+        task_type == 'D' ? "DeliverTool" :
+        task_type == 'R' ? "Recharge" :
+        task_type == 'W' ? "Wait" : 
+        "Task");
+    task_queue_.push(task_queue_.front());
+    task_queue_.pop();
+  }
+}
+
+// ---------------- Planner definitions ---------------- //
