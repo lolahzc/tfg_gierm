@@ -1,33 +1,20 @@
-#ifndef AGENT_H
-#define AGENT_H
+#ifndef AGENT_BEHAVIOUR_MANAGER_H
+#define AGENT_BEHAVIOUR_MANAGER_H
 
 #include "rclcpp/rclcpp.hpp"
-#include "ament_index_cpp/get_package_share_directory.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
 #include "yaml-cpp/yaml.h"
 
 #include <string>
-#include <queue>
 #include <sstream>
-#include "rclcpp_action/rclcpp_action.hpp"
+#include <queue>
+#include <memory>
 
 #include "behaviortree_cpp_v3/bt_factory.h"
 #include "behaviortree_cpp_v3/loggers/bt_cout_logger.h"
 #include "behaviortree_cpp_v3/loggers/bt_minitrace_logger.h"
 #include "behaviortree_cpp_v3/loggers/bt_file_logger.h"
 #include "behaviortree_cpp_v3/loggers/bt_zmq_publisher.h"
-#include "behaviortree_cpp_v3/behavior_tree.h"
-#include "behaviortree_cpp_v3/bt_factory.h"
-#include "behaviortree_cpp_v3/action_node.h"
-#include "behaviortree_cpp_v3/condition_node.h"
-#include "behaviortree_cpp_v3/decorator_node.h"
-
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "geometry_msgs/msg/point.hpp"
-#include "geographic_msgs/msg/geo_pose_stamped.hpp"
-#include "geographic_msgs/msg/geo_pose.hpp"
-#include "geographic_msgs/msg/geo_point.hpp"
-#include "sensor_msgs/msg/battery_state.hpp"
-#include "sensor_msgs/msg/nav_sat_fix.hpp"
 
 #include "mission_planner/classes.hpp"
 #include "mission_planner/msg/agent_beacon.hpp"
@@ -40,581 +27,574 @@
 #include "mission_planner/msg/task.hpp"
 #include "mission_planner/action/request_mobile_charging_station.hpp"
 
-// Nada segura de que esto vaya a funcionar de la misma manera que UAL
-#include "as2_msgs/action/land.hpp"
+// Aerostack2 official includes
+#include "as2_msgs/msg/platform_info.hpp"
 #include "as2_msgs/action/takeoff.hpp"
+#include "as2_msgs/action/land.hpp"
 #include "as2_msgs/action/go_to_waypoint.hpp"
-#include "as2_msgs/msg/pose_stamped_with_id.hpp"
+#include "as2_core/node.hpp"
+#include "as2_msgs/msg/yaw_mode.hpp"
 
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/point.hpp"
+#include "geographic_msgs/msg/geo_pose_stamped.hpp"
+#include "geographic_msgs/msg/geo_pose.hpp"
+#include "geographic_msgs/msg/geo_point.hpp"
+#include "sensor_msgs/msg/battery_state.hpp"
+#include "sensor_msgs/msg/nav_sat_fix.hpp"
+
+#include "behaviortree_cpp_v3/behavior_tree.h"
+#include "behaviortree_cpp_v3/bt_factory.h"
+#include "behaviortree_cpp_v3/action_node.h"
+#include "behaviortree_cpp_v3/condition_node.h"
+#include "behaviortree_cpp_v3/decorator_node.h"
 
 // Forward declaration
 class AgentNode;
 
-// BT nodes declaration
+// Behavior Tree Nodes declaration ***********************************************************************************
+// ******************************* Actions
 class GoNearChargingStation : public BT::AsyncActionNode
 {
-  private :
-        AgentNode* agent_;
+private:
+    AgentNode* agent_;
 
-  public : 
-        GoNearChargingStation(const std::string& name, const BT::NodeConfiguration& config);
-        ~GoNearChargingStation();
+public:
+    GoNearChargingStation(const std::string& name, const BT::NodeConfiguration& config);
+    ~GoNearChargingStation();
     void init(AgentNode* agent);
-        static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
-        
 };
 
-// Recharge
 class Recharge : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		Recharge(const std::string& name, const BT::NodeConfiguration& config);
-		~Recharge();
+public:
+    Recharge(const std::string& name, const BT::NodeConfiguration& config);
+    ~Recharge();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//BackToStation
 class BackToStation : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		BackToStation(const std::string& name, const BT::NodeConfiguration& config);
-		~BackToStation();
+public:
+    BackToStation(const std::string& name, const BT::NodeConfiguration& config);
+    ~BackToStation();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//GoNearHumanTarget
 class GoNearHumanTarget : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		GoNearHumanTarget(const std::string& name, const BT::NodeConfiguration& config);
-		~GoNearHumanTarget();
+public:
+    GoNearHumanTarget(const std::string& name, const BT::NodeConfiguration& config);
+    ~GoNearHumanTarget();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//MonitorHumanTarget
 class MonitorHumanTarget : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		MonitorHumanTarget(const std::string& name, const BT::NodeConfiguration& config);
-		~MonitorHumanTarget();
+public:
+    MonitorHumanTarget(const std::string& name, const BT::NodeConfiguration& config);
+    ~MonitorHumanTarget();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//GoNearUGV
 class GoNearUGV : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		GoNearUGV(const std::string& name, const BT::NodeConfiguration& config);
-		~GoNearUGV();
+public:
+    GoNearUGV(const std::string& name, const BT::NodeConfiguration& config);
+    ~GoNearUGV();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//MonitorUGV
 class MonitorUGV : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		MonitorUGV(const std::string& name, const BT::NodeConfiguration& config);
-		~MonitorUGV();
+public:
+    MonitorUGV(const std::string& name, const BT::NodeConfiguration& config);
+    ~MonitorUGV();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//GoNearWP
 class GoNearWP : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		GoNearWP(const std::string& name, const BT::NodeConfiguration& config);
-		~GoNearWP();
+public:
+    GoNearWP(const std::string& name, const BT::NodeConfiguration& config);
+    ~GoNearWP();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//TakeImage
 class TakeImage : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		TakeImage(const std::string& name, const BT::NodeConfiguration& config);
-		~TakeImage();
+public:
+    TakeImage(const std::string& name, const BT::NodeConfiguration& config);
+    ~TakeImage();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//InspectPVArray
 class InspectPVArray : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		InspectPVArray(const std::string& name, const BT::NodeConfiguration& config);
-		~InspectPVArray();
+public:
+    InspectPVArray(const std::string& name, const BT::NodeConfiguration& config);
+    ~InspectPVArray();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//GoNearStation
 class GoNearStation : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		GoNearStation(const std::string& name, const BT::NodeConfiguration& config);
-		~GoNearStation();
+public:
+    GoNearStation(const std::string& name, const BT::NodeConfiguration& config);
+    ~GoNearStation();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//PickTool
 class PickTool : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		PickTool(const std::string& name, const BT::NodeConfiguration& config);
-		~PickTool();
+public:
+    PickTool(const std::string& name, const BT::NodeConfiguration& config);
+    ~PickTool();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//DropTool
 class DropTool : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		DropTool(const std::string& name, const BT::NodeConfiguration& config);
-		~DropTool();
+public:
+    DropTool(const std::string& name, const BT::NodeConfiguration& config);
+    ~DropTool();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-//DeliverTool
 class DeliverTool : public BT::AsyncActionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-  public:
-		DeliverTool(const std::string& name, const BT::NodeConfiguration& config);
-		~DeliverTool();
+public:
+    DeliverTool(const std::string& name, const BT::NodeConfiguration& config);
+    ~DeliverTool();
     void init(AgentNode* agent);
-		static BT::PortsList providedPorts();
+    static BT::PortsList providedPorts();
     BT::NodeStatus tick() override;
     virtual void halt() override;
 };
 
-
-// BT Conditions
-
-//MissionOver
+// ******************************* Conditions
 class MissionOver : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		MissionOver(const std::string& name);
+public:
+    MissionOver(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//Idle
 class Idle : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		Idle(const std::string& name);
+public:
+    Idle(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsBatteryEnough
 class IsBatteryEnough : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsBatteryEnough(const std::string& name);
+public:
+    IsBatteryEnough(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsBatteryFull
 class IsBatteryFull : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsBatteryFull(const std::string& name);
+public:
+    IsBatteryFull(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskRecharge
 class IsTaskRecharge : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskRecharge(const std::string& name);
+public:
+    IsTaskRecharge(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskMonitor
 class IsTaskMonitor : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskMonitor(const std::string& name);
+public:
+    IsTaskMonitor(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskMonitorUGV
 class IsTaskMonitorUGV : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskMonitorUGV(const std::string& name);
+public:
+    IsTaskMonitorUGV(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskInspect
 class IsTaskInspect : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskInspect(const std::string& name);
+public:
+    IsTaskInspect(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskInspectPVArray
 class IsTaskInspectPVArray : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskInspectPVArray(const std::string& name);
+public:
+    IsTaskInspectPVArray(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsTaskDeliverTool
 class IsTaskDeliverTool : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsTaskDeliverTool(const std::string& name);
+public:
+    IsTaskDeliverTool(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsAgentNearChargingStation
 class IsAgentNearChargingStation : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsAgentNearChargingStation(const std::string& name);
+public:
+    IsAgentNearChargingStation(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsAgentNearHumanTarget
 class IsAgentNearHumanTarget : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsAgentNearHumanTarget(const std::string& name);
+public:
+    IsAgentNearHumanTarget(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsAgentNearUGV
 class IsAgentNearUGV : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsAgentNearUGV(const std::string& name);
+public:
+    IsAgentNearUGV(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsAgentNearWP
 class IsAgentNearWP : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsAgentNearWP(const std::string& name);
+public:
+    IsAgentNearWP(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//NeedToDropTheTool
 class NeedToDropTheTool : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		NeedToDropTheTool(const std::string& name);
+public:
+    NeedToDropTheTool(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//HasAgentTheTool
 class HasAgentTheTool : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		HasAgentTheTool(const std::string& name);
+public:
+    HasAgentTheTool(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//IsAgentNearStation
 class IsAgentNearStation : public BT::ConditionNode
 {
-  private:
+private:
     AgentNode* agent_;
 
-	public:
-		IsAgentNearStation(const std::string& name);
+public:
+    IsAgentNearStation(const std::string& name);
     void init(AgentNode* agent);
-		BT::NodeStatus tick() override;
+    BT::NodeStatus tick() override;
 };
 
-//******************************* Decorators
-//ForceRunnigNode
+// ******************************* Decorators
 class ForceRunningNode : public BT::DecoratorNode
 {
-  public:
+public:
     ForceRunningNode(const std::string& name);
 
-  private:
+private:
     virtual BT::NodeStatus tick() override;
 };
 
-
-// Behavior Tree Nodes Registration
+// Behavior Tree Nodes registration function *************************************************************************
 inline void RegisterNodes(BT::BehaviorTreeFactory& factory);
 
-
-//Agent Node Class declaration **************************************************************************************
-class AgentNode
+// Agent Node Class declaration **************************************************************************************
+class AgentNode : public as2::Node
 {
-  //Actions
-	friend class GoNearChargingStation;
-  friend class Recharge;
-  friend class BackToStation;
-  friend class GoNearHumanTarget;
-  friend class MonitorHumanTarget;
-  friend class GoNearUGV;
-  friend class MonitorUGV;
-  friend class GoNearWP;
-  friend class TakeImage;
-  friend class InspectPVArray;
-  friend class GoNearStation;
-  friend class PickTool;
-  friend class DropTool;
-  friend class DeliverTool;
+    // Actions
+    friend class GoNearChargingStation;
+    friend class Recharge;
+    friend class BackToStation;
+    friend class GoNearHumanTarget;
+    friend class MonitorHumanTarget;
+    friend class GoNearUGV;
+    friend class MonitorUGV;
+    friend class GoNearWP;
+    friend class TakeImage;
+    friend class InspectPVArray;
+    friend class GoNearStation;
+    friend class PickTool;
+    friend class DropTool;
+    friend class DeliverTool;
 
-  //Conditions
-  friend class MissionOver;
-  friend class Idle;
-  friend class IsBatteryEnough;
-  friend class IsBatteryFull;
-  friend class IsTaskRecharge;
-  friend class IsTaskMonitor;
-  friend class IsTaskMonitorUGV;
-  friend class IsTaskInspect;
-  friend class IsTaskInspectPVArray;
-  friend class IsTaskDeliverTool;
-  friend class IsTaskRecharge;
-  friend class IsAgentNearHumanTarget;
-  friend class IsAgentNearUGV;
-  friend class IsAgentNearWP;
-  friend class NeedToDropTheTool;
-  friend class HasAgentTheTool;
-  friend class IsAgentNearStation;
-  friend class IsAgentNearChargingStation;
+    // Conditions
+    friend class MissionOver;
+    friend class Idle;
+    friend class IsBatteryEnough;
+    friend class IsBatteryFull;
+    friend class IsTaskRecharge;
+    friend class IsTaskMonitor;
+    friend class IsTaskMonitorUGV;
+    friend class IsTaskInspect;
+    friend class IsTaskInspectPVArray;
+    friend class IsTaskDeliverTool;
+    friend class IsTaskRecharge;
+    friend class IsAgentNearHumanTarget;
+    friend class IsAgentNearUGV;
+    friend class IsAgentNearWP;
+    friend class NeedToDropTheTool;
+    friend class HasAgentTheTool;
+    friend class IsAgentNearStation;
+    friend class IsAgentNearChargingStation;
 
-  //Decorators
-  friend class ForceRunningNode;
+    // Decorators
+    friend class ForceRunningNode;
 
-  private :
+private:
+    std::string id_;
+    std::string ns_prefix_;
 
-  rclcpp::Node::SharedPtr nh_;
+    geographic_msgs::msg::GeoPoint origin_geo_;
 
-  std::string id_;
-  std::string ns_prefix_;
+    // Action Server to receive TaskList
+    rclcpp_action::Server<mission_planner::action::NewTaskList>::SharedPtr ntl_as_;
+    
+    // Action Client to Battery Enough
+    rclcpp_action::Client<mission_planner::action::BatteryEnough>::SharedPtr battery_ac_;
 
-  geographic_msgs::msg::GeoPoint origin_geo_;
+    rclcpp_action::Client<mission_planner::action::TaskResult>::SharedPtr task_result_ac_;
 
-  rclcpp_action::Server<mission_planner::action::NewTaskList>::SharedPtr ntl_as_;
-  rclcpp_action::Client<mission_planner::action::BatteryEnough>::SharedPtr battery_ac_;
+    // Subscribers
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr position_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
+    rclcpp::Subscription<as2_msgs::msg::PlatformInfo>::SharedPtr platform_info_sub_;
+    rclcpp::Subscription<mission_planner::msg::MissionOver>::SharedPtr mission_over_sub_;
+    rclcpp::Subscription<mission_planner::msg::PlannerBeacon>::SharedPtr planner_beacon_sub_;
+    rclcpp::Subscription<geographic_msgs::msg::GeoPoseStamped>::SharedPtr atrvjr_geopose_sub_;
+    rclcpp::Subscription<geographic_msgs::msg::GeoPoseStamped>::SharedPtr jackal_geopose_sub_;
+    
+    classes::Position position_;
+    float battery_; // percentage
+    int state_;
+    bool mission_over_;
+    rclcpp::Time last_beacon_;
+    bool timeout_;
+    classes::Position atrvjr_pose_;
+    classes::Position jackal_pose_;
+    float take_off_height_;
+    float distance_error_;
+    float goto_error_;
 
-  // Subscribers
-  rclcpp::Subscription<as2_msgs::msg::PoseStampedWithID>::SharedPtr position_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
-  rclcpp::Subscription<as2_msgs::msg::PoseStampedWithID>::SharedPtr state_sub_; // Aquí ya no tengo State como en UAL, revisar porque cambiar exactamente
-  rclcpp::Subscription<mission_planner::msg::MissionOver>::SharedPtr mission_over_sub_;
-  rclcpp::Subscription<mission_planner::msg::PlannerBeacon>::SharedPtr planner_beacon_sub_;
-  rclcpp::Subscription<geographic_msgs::msg::GeoPose>::SharedPtr atrvjr_geopose_sub_; //No sé si es con ID/Stamped o qué, mirarlo bien
-  rclcpp::Subscription<geographic_msgs::msg::GeoPose>::SharedPtr jackal_geopose_sub_; 
+    // Publishers
+    rclcpp::Publisher<mission_planner::msg::AgentBeacon>::SharedPtr beacon_pub_;
+    mission_planner::msg::AgentBeacon beacon_;
+    rclcpp::Rate loop_rate_;
 
-  classes::Position position_;
-  float battery_;
-  int state_;
-  bool mission_over_;
-  rclcpp::Time last_beacon_;
-  bool timeout_;
-  classes::Position atrvjr_pose_;
-  classes::Position jackal_pose_;
-  float take_off_height_;
-  float distance_error_;
-  float goto_error_;
+    std::queue<classes::Task*> task_queue_;
+    bool battery_enough_;
+    std::string tool_flag_;
+    std::string pose_frame_id_;
+    std::string pose_topic_;
+    std::string state_topic_;
+    std::string battery_topic_;
 
-  // Publishers
-  rclcpp::Publisher<mission_planner::msg::PlannerBeacon>::SharedPtr beacon_pub_;
-  mission_planner::msg::PlannerBeacon beacon_;
-  rclcpp::Rate loop_rste_;
+    std::string config_file_;
+    std::string config_file_evora_;
 
-  std::queue<classes::Task*> task_queue_;
-  bool battery_enough_;
-  std::string tool_flag_;
-  std::string pose_frame_id_;
-  std::string pose_topic_;
-  std::string state_topic_;
-  std::string battery_topic_;
+    std::map<std::string, std::map<std::string, classes::Position>> known_positions_;
+    std::map<std::string, classes::HumanTarget> human_targets_;
+    std::map<std::string, classes::Tool> tools_;
 
-  std::string config_file_;
-  std::string config_file_evora_;
+    // Aerostack2 action clients
+    rclcpp_action::Client<as2_msgs::action::Takeoff>::SharedPtr takeoff_ac_;
+    rclcpp_action::Client<as2_msgs::action::Land>::SharedPtr land_ac_;
+    rclcpp_action::Client<as2_msgs::action::GoToWaypoint>::SharedPtr goto_ac_;
 
-  std::map <std::string, std::map <std::string, classes::Position>> known_positions_;
-  std::map <std::string, classes::HumanTarget> human_targets_;
-  std::map <std::string, classes::Tool> tools_;
-  
 protected:
+    void readConfigFile(const std::string& config_file);
+    void readEvoraConfigFile(const std::string& config_file);
 
-  void ReadConfigFile(std::string config_file);
-  void ReadConfigFileEvora(std::string congig_file);
+public:
+    AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+    ~AgentNode();
+        
+    // Task queue methods
+    void addTaskToQueue(classes::Task* task);
+    void removeTaskFromQueue(const std::string& id, char type);
+    void emptyTheQueue();
+    int getQueueSize();
+    void infoQueue();
+    void taskQueueManager();
+    void isBatteryEnough();
 
-public : 
-
-  AgentNode(mission_planner::msg::AgentBeacon beacon);
-  ~AgentNode(void);
-
-  void isBatteryEnough();
-  void addTaskFromQueue(classes::Task* task);
-  void removeTaskFromQueue(std::string id, char type);
-  void emptyTheQueue();
-  int getQueueSize();
-  void infoQueue();
-  void taskQueueManager();
-
-  void newTaskList(const std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal);
-  void positionCallbackAS2(const geometry_msgs::msg::PoseStamped& pose);
-  void batteryCallback(const sensor_msgs::msg::BatteryState& battery);
-  void stateCallbackAS2(); // RELLENAR CON LO QUE SEA QUE USEMOS PARA SACAR EL STATE, ANTES SE SACABA DIRECTAMENTE DE UAL
-  void beaconCallback(const mission_planner::msg::AgentBeacon::SharedPtr beacon);
-  void missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value);
-  void checkBeaconsTimeout(rclcpp::Time now);
-
-  void atrvjrPositionCallback(const geographic_msgs::msg::GeoPoseStamped& geo_pose);
-  void jackalPositionCallback(const geographic_msgs::msg::GeoPoseStamped& geo_pose);
-
-
-  bool land(bool blocking);
-  bool takeoff(float height, bool blocking);
-  bool go_to_waypoint(float x, float y, float z, bool blocking);
-  bool stop(bool blocking);
-  bool checkIfGoToServiceSucceeded(float x, float y, float z);
-
-}; 
+    // New Task List Action callback
+    rclcpp_action::GoalResponse handleNewTaskListGoal(const rclcpp_action::GoalUUID& uuid, std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal);
+    rclcpp_action::CancelResponse handleNewTaskListCancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTaskList>> goal_handle);
+    void handleNewTaskListAccepted(const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTaskList>> goal_handle);
+    
+    void positionCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose);
+    void batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr battery);
+    void platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPtr info);
+    void missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value);
+    void beaconCallback(const mission_planner::msg::PlannerBeacon::SharedPtr beacon);
+    bool checkBeaconTimeout(rclcpp::Time now);
+    void atrvjrPositionCallback(const geographic_msgs::msg::GeoPoseStamped::SharedPtr geo_pose);
+    void jackalPositionCallback(const geographic_msgs::msg::GeoPoseStamped::SharedPtr geo_pose);
+    
+    // Aerostack2 Service calls
+    bool land(bool blocking);
+    bool take_off(float height, bool blocking);
+    bool go_to_waypoint(float x, float y, float z, bool blocking);
+    bool stop(bool blocking);
+    bool checkIfGoToServiceSucceeded(float x, float y, float z);
+    
+    // Helper methods for Aerostack2 actions
+    void executeTakeoffAction(float height);
+    void executeLandAction();
+    void executeGoToWaypointAction(float x, float y, float z);
+};
 
 #endif

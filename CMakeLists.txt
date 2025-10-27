@@ -9,6 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Dependencies
 # -----------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -21,6 +22,7 @@ find_package(geographic_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(behaviortree_cpp_v3 QUIET)
 find_package(yaml-cpp QUIET)
+find_package(as2_core REQUIRED)
 
 # -----------------------------------------------------------------------------
 # Message and Action definitions
@@ -66,7 +68,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
     sensor_msgs
     geographic_msgs
     as2_msgs
+    as2_core
     builtin_interfaces
+    ament_index_cpp
 )
 
 ament_export_dependencies(rosidl_default_runtime)
@@ -90,6 +94,7 @@ ament_target_dependencies(${PROJECT_NAME}_core
   sensor_msgs
   geographic_msgs
   as2_msgs
+  as2_core
   builtin_interfaces
 )
 if(behaviortree_cpp_v3_FOUND)
@@ -133,7 +138,7 @@ function(add_agent_executable exe_name src_file)
     as2_msgs
     geographic_msgs
     builtin_interfaces
-    mission_planner
+    
   )
   target_link_libraries(${exe_name} ${PROJECT_NAME}_core)
   if(yaml-cpp_FOUND)
@@ -144,8 +149,8 @@ function(add_agent_executable exe_name src_file)
 endfunction()
 
 #add_agent_executable(gesture_recognition_faker gesture_recognition_faker.cpp)
-#add_agent_executable(high_level_planner high_level_planner.cpp)
-#add_agent_executable(agent_behaviour_manager agent_behaviour_manager.cpp)
+add_agent_executable(high_level_planner high_level_planner.cpp)
+add_agent_executable(agent_behaviour_manager agent_behaviour_manager.cpp)
 #add_agent_executable(battery_faker battery_faker.cpp)
 #add_agent_executable(ist_ugv_faker ist_ugv_faker.cpp)
 

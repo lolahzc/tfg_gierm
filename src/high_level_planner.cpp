@@ -42,7 +42,7 @@ Agent::Agent(Planner* planner,
   nh_->get_parameter("battery_topic", battery_topic_);
 
   // Crear subscriptores
-  position_sub_ = nh_->create_subscription<as2_msgs::msg::PoseStampedWithID>("/" + id_ + pose_topic_, 10,
+  position_sub_ = nh_->create_subscription<geometry_msgs::msg::PoseStamped>("/" + id_ + pose_topic_, 10,
                       std::bind(&Agent::positionCallbackAS2, this, _1));
 
   battery_sub_ = nh_->create_subscription<sensor_msgs::msg::BatteryState>("/" + id_ + battery_topic_, 10,
@@ -92,7 +92,7 @@ Agent::Agent(const Agent& a)
   nh_ = rclcpp::Node::make_shared("agent_copy_" + id_);
 
   // Recrear suscriptores
-  position_sub_ = nh_->create_subscription<as2_msgs::msg::PoseStampedWithID>(
+  position_sub_ = nh_->create_subscription<geometry_msgs::msg::PoseStamped>(
       "/" + id_ + pose_topic_,
       10,
       std::bind(&Agent::positionCallbackAS2, this, std::placeholders::_1));
@@ -1731,15 +1731,17 @@ void Planner::deletePendingTask(std::string task_id)
 bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal)
 {
     classes::Task* aux = nullptr;
-
     std::string id = goal->task.id;
     char type = goal->task.type;
 
+    // Mover las declaraciones fuera del switch
     std::string m_human_target_id;
     float distance;
     int number;
     std::string d_tool_id;
     std::string d_human_target_id;
+    std::map<std::string, classes::HumanTarget>::iterator human_itr;
+    std::map<std::string, classes::Tool>::iterator tool_itr;
 
     // Check if the task exists
     auto task_itr = pending_tasks_.find(id);
@@ -1749,11 +1751,12 @@ bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::acti
         {
             case 'M':
             case 'm':
+            {
                 m_human_target_id = goal->task.monitor.human_target_id;
                 distance = goal->task.monitor.distance;
                 number = goal->task.monitor.number;
 
-                auto human_itr = human_targets_.find(m_human_target_id);
+                human_itr = human_targets_.find(m_human_target_id);
                 if(human_itr == human_targets_.end())
                 {
                     RCLCPP_INFO(get_logger(), "[updateTaskParams] Invalid task: unknown human target ID");
@@ -1762,23 +1765,31 @@ bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::acti
                 aux = new classes::Monitor(id, &(human_targets_[m_human_target_id]), distance, number);
                 task_itr->second->updateParams(aux);
                 break;
+            }
             case 'F':
             case 'f':
+            {
                 aux = new classes::MonitorUGV(id, goal->task.monitor_ugv.ugv_id, goal->task.monitor_ugv.height);
                 task_itr->second->updateParams(aux);
                 break;
+            }
             case 'I':
             case 'i':
+            {
                 aux = new classes::Inspect(id, goal->task.inspect.waypoints);
                 task_itr->second->updateParams(aux);
                 break;
+            }
             case 'A':
             case 'a':
+            {
                 aux = new classes::InspectPVArray(id, goal->task.inspect.waypoints);
                 task_itr->second->updateParams(aux);
                 break;
+            }
             case 'D':
             case 'd':
+            {
                 d_tool_id = goal->task.deliver.tool_id;
                 d_human_target_id = goal->task.deliver.human_target_id;
 
@@ -1797,12 +1808,12 @@ bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::acti
                 aux = new classes::DeliverTool(id, &(tools_[d_tool_id]), &(human_targets_[d_human_target_id]));
                 task_itr->second->updateParams(aux);
                 break;
+            }
             default:
                 break;
         }
     }
 
-    // Solo eliminar aux si fue asignado
     if (aux != nullptr) {
         delete aux;
     }

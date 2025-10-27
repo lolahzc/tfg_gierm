@@ -54,7 +54,7 @@ class Agent{
 	rclcpp::Node::SharedPtr nh_;
 
     //Subscribers
-	rclcpp::Subscription<as2_msgs::msg::PoseStampedWithID>::SharedPtr position_sub_;
+	rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr position_sub_;
 	rclcpp::Subscription<sensor_msgs::msg::BatteryState>::SharedPtr battery_sub_;
 
     //Topics
