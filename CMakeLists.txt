@@ -124,6 +124,30 @@ install(
   DESTINATION include/mission_planner
 )
 
+# Install launch files
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+# Install scripts
+install(DIRECTORY
+  scripts
+  DESTINATION share/${PROJECT_NAME}/
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+)
+
+# Install config files (si tienes)
+install(DIRECTORY
+  config
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+install(
+  DIRECTORY gazebo_worlds/
+  DESTINATION share/${PROJECT_NAME}/
+)
+
 # -----------------------------------------------------------------------------
 # Executables
 # -----------------------------------------------------------------------------
