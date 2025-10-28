@@ -151,7 +151,7 @@ endfunction()
 #add_agent_executable(gesture_recognition_faker gesture_recognition_faker.cpp)
 add_agent_executable(high_level_planner high_level_planner.cpp)
 add_agent_executable(agent_behaviour_manager agent_behaviour_manager.cpp)
-#add_agent_executable(battery_faker battery_faker.cpp)
+add_agent_executable(battery_faker battery_faker.cpp)
 #add_agent_executable(ist_ugv_faker ist_ugv_faker.cpp)
 
 # -----------------------------------------------------------------------------
