@@ -555,6 +555,16 @@ private:
     rclcpp_action::Client<as2_msgs::action::Land>::SharedPtr land_ac_;
     rclcpp_action::Client<as2_msgs::action::GoToWaypoint>::SharedPtr goto_ac_;
 
+    // Behavior Tree Members
+    BT::BehaviorTreeFactory factory_;
+    BT::Tree tree_;
+    std::unique_ptr<std::thread> bt_thread_;
+    std::atomic_bool bt_running_;
+
+    void initializeBehaviorTree();
+    void initializeBTNodes();
+    void executeBehaviorTree();
+
 protected:
     void readConfigFile(const std::string& config_file);
     void readEvoraConfigFile(const std::string& config_file);

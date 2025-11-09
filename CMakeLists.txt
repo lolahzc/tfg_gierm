@@ -148,6 +148,12 @@ install(
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(
+  FILES 
+    src/behaviour_tree.xml
+  DESTINATION share/${PROJECT_NAME}
+)
+
 # -----------------------------------------------------------------------------
 # Executables
 # -----------------------------------------------------------------------------

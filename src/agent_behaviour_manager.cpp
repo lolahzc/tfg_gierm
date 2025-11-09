@@ -1963,7 +1963,8 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
     beacon_(beacon), 
     mission_over_(false), 
     state_(0), 
-    battery_(0)
+    battery_(0),
+    bt_running_(false)
 {
   // Declarar parámetros
   this->declare_parameter<std::string>("id", "0");
@@ -2063,9 +2064,203 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
   readConfigFile(config_file);
   // Inicializar Behavior Tree
   // [Implementar inicialización del Behavior Tree...]
+
+  initializeBehaviorTree();
+
 }
 
-AgentNode::~AgentNode() {}
+void AgentNode::initializeBehaviorTree() {
+  RCLCPP_INFO(this->get_logger(), "🌳 Inicializando Behavior Tree...");
+  
+  try {
+      // Registrar todos los nodos BT
+      RegisterNodes(factory_);
+
+      // VERIFICAR ÁRBOLES REGISTRADOS
+      auto trees = factory_.registeredBehaviorTrees();
+      RCLCPP_INFO(this->get_logger(), "📋 Árboles BT registrados:");
+      for (const auto& tree : trees) {
+          RCLCPP_INFO(this->get_logger(), "  - %s", tree.c_str());
+      }
+      
+      // Cargar el BT desde el directorio share del paquete (SIN /src/)
+      std::string package_path = ament_index_cpp::get_package_share_directory("mission_planner");
+      std::string bt_xml_file = package_path + "/behaviour_tree.xml";
+      
+      RCLCPP_INFO(this->get_logger(), "📁 Cargando BT desde: %s", bt_xml_file.c_str());
+      
+      // Verificar que el archivo existe
+      std::ifstream file(bt_xml_file);
+      if (!file.good()) {
+          RCLCPP_ERROR(this->get_logger(), "❌ Archivo BT no encontrado: %s", bt_xml_file.c_str());
+          
+          // Buscar alternativas
+          RCLCPP_INFO(this->get_logger(), "🔍 Buscando archivo BT alternativo...");
+          
+          std::vector<std::string> possible_paths = {
+              package_path + "/behaviour_tree.xml",  // Ruta correcta
+              "src/tfg_gierm/src/behaviour_tree.xml", // Ruta desde workspace
+              "../src/tfg_gierm/src/behaviour_tree.xml",
+              "behaviour_tree.xml"
+          };
+          
+          bool found = false;
+          for (const auto& path : possible_paths) {
+              std::ifstream alt_file(path);
+              if (alt_file.good()) {
+                  bt_xml_file = path;
+                  RCLCPP_INFO(this->get_logger(), "✅ Encontrado en: %s", bt_xml_file.c_str());
+                  found = true;
+                  break;
+              }
+          }
+          
+          if (!found) {
+              RCLCPP_FATAL(this->get_logger(), "❌ No se pudo encontrar behaviour_tree.xml");
+              
+              // Debug: listar contenido del directorio
+              RCLCPP_INFO(this->get_logger(), "📂 Contenido de %s:", package_path.c_str());
+              std::string ls_cmd = "ls -la " + package_path;
+              std::system(ls_cmd.c_str());
+              
+              return;
+          }
+      }
+      
+      // Crear el árbol de comportamiento desde archivo
+      tree_ = factory_.createTreeFromFile(bt_xml_file);
+      RCLCPP_INFO(this->get_logger(), "✅ Behavior Tree creado exitosamente");
+      
+      // Inicializar todos los nodos BT con este AgentNode
+      initializeBTNodes();
+      
+      // Iniciar el hilo de ejecución del BT
+      bt_running_ = true;
+      bt_thread_ = std::make_unique<std::thread>([this]() {
+          this->executeBehaviorTree();
+      });
+      
+      RCLCPP_INFO(this->get_logger(), "🚀 Behavior Tree ejecutándose en segundo plano");
+      
+  } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "❌ Error creando Behavior Tree: %s", e.what());
+  }
+}
+
+void AgentNode::initializeBTNodes() {
+    RCLCPP_INFO(this->get_logger(), "🔧 Inicializando nodos del Behavior Tree...");
+    
+    // Inicializar todos los nodos de acción (igual que en ROS1)
+    auto nodes = tree_.nodes;
+    for (auto& node : nodes) {
+        // Actions
+        if (auto action = dynamic_cast<GoNearChargingStation*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<Recharge*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<BackToStation*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<GoNearHumanTarget*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<MonitorHumanTarget*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<GoNearUGV*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<MonitorUGV*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<GoNearWP*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<TakeImage*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<InspectPVArray*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<GoNearStation*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<PickTool*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<DropTool*>(node.get())) {
+            action->init(this);
+        } else if (auto action = dynamic_cast<DeliverTool*>(node.get())) {
+            action->init(this);
+        }
+        // Conditions
+        else if (auto condition = dynamic_cast<MissionOver*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<Idle*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsBatteryEnough*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsBatteryFull*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskRecharge*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskMonitor*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskMonitorUGV*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskInspect*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskInspectPVArray*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsTaskDeliverTool*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsAgentNearChargingStation*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsAgentNearHumanTarget*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsAgentNearUGV*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsAgentNearWP*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<NeedToDropTheTool*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<HasAgentTheTool*>(node.get())) {
+            condition->init(this);
+        } else if (auto condition = dynamic_cast<IsAgentNearStation*>(node.get())) {
+            condition->init(this);
+        }
+    }
+    RCLCPP_INFO(this->get_logger(), "✅ Todos los nodos BT inicializados");
+}
+
+void AgentNode::executeBehaviorTree() {
+    RCLCPP_INFO(this->get_logger(), "🔄 Iniciando ejecución del Behavior Tree...");
+    
+    // Añadir logger para debug (opcional)
+    BT::StdCoutLogger logger_cout(tree_);
+    
+    while (rclcpp::ok() && bt_running_ && !mission_over_) {
+        try {
+            // Ejecutar un tick del BT
+            BT::NodeStatus status = tree_.tickRoot();
+            
+            // Log del estado cada cierto tiempo para no saturar
+            static auto last_log = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 5) {
+                RCLCPP_DEBUG(this->get_logger(), "🔄 BT Status: %d", static_cast<int>(status));
+                last_log = now;
+            }
+            
+            // Pequeña pausa para no saturar la CPU
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "❌ Error en ejecución del BT: %s", e.what());
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "🛑 Behavior Tree detenido");
+}
+
+AgentNode::~AgentNode() 
+{
+  bt_running_ = false;
+  if (bt_thread_ && bt_thread_->joinable()) {
+      bt_thread_->join();
+  }
+}
 
 // Callbacks
 void AgentNode::positionCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose) {

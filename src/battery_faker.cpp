@@ -10,25 +10,27 @@ BatteryFaker::BatteryFaker()
     battery_increase_(0.001f),
     battery_decrease_(0.001f)
 {
-    // Declarar parámetros
+    // Declarar todos los parámetros
     this->declare_parameter<std::string>("battery_mode", "static");
-    this->declare_parameter<std::string>("id", "i");
+    this->declare_parameter<std::string>("id", "uav0");  // Valor por defecto específico
     this->declare_parameter<std::string>("pose_topic", "");
     this->declare_parameter<std::string>("state_topic", "");
     this->declare_parameter<std::string>("config_file", "");
 
-    // Obtener parámetros
+    // Obtener parámetros PRIMERO
     this->get_parameter("battery_mode", battery_mode_);
     this->get_parameter("id", id_);
-    
-    // Configurar topics con namespace del UAV
-    std::string default_pose_topic = "/" + id_ + "/self_localization/pose";
-    std::string default_state_topic = "/" + id_ + "/platform/info";
-    
-    this->declare_parameter<std::string>("pose_topic", default_pose_topic);
-    this->declare_parameter<std::string>("state_topic", default_state_topic);
     this->get_parameter("pose_topic", pose_topic_);
     this->get_parameter("state_topic", state_topic_);
+    this->get_parameter("config_file", config_file_);
+
+    // Si los topics están vacíos, configurar valores por defecto
+    if (pose_topic_.empty()) {
+        pose_topic_ = "/" + id_ + "/self_localization/pose";
+    }
+    if (state_topic_.empty()) {
+        state_topic_ = "/" + id_ + "/platform/info";
+    }
 
     // Determinar modo de batería
     if (battery_mode_ == "recharge_anywhere")
@@ -41,19 +43,13 @@ BatteryFaker::BatteryFaker()
         mode_ = 0;
 
     // Cargar archivo de configuración
-    this->get_parameter("config_file", config_file_);
     if (config_file_.empty()) {
         try {
-            // Buscar path del package usando ament_index_cpp
             std::string package_share_dir = ament_index_cpp::get_package_share_directory("mission_planner");
             config_file_ = package_share_dir + "/config/conf.yaml";
             RCLCPP_INFO(this->get_logger(), "Found package share directory: %s", package_share_dir.c_str());
         } catch (const std::exception& e)  {
             RCLCPP_ERROR(this->get_logger(), "Package 'mission_planner' not found: %s", e.what());
-            RCLCPP_ERROR(this->get_logger(), "Please set the 'config_file' parameter manually");
-            // Puedes decidir si quieres terminar el nodo o continuar sin config file
-            // rclcpp::shutdown();
-            // return;
         }
     }
 
@@ -77,12 +73,15 @@ BatteryFaker::BatteryFaker()
         state_topic_, 1,
         std::bind(&BatteryFaker::platformInfoCallback, this, std::placeholders::_1));
 
-    RCLCPP_INFO(this->get_logger(), "READY");
+    RCLCPP_INFO(this->get_logger(), "Battery Faker READY for UAV: %s", id_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Pose topic: %s", pose_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "State topic: %s", state_topic_.c_str());
+    
     battery_.percentage = 1.0f;
 
     // Timer para actualizar la batería
     auto timer = this->create_wall_timer(
-        std::chrono::milliseconds(500),  // 0.5 segundos = 2Hz
+        std::chrono::milliseconds(500),
         std::bind(&BatteryFaker::update_battery, this));
 }
 
