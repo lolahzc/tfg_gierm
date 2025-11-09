@@ -93,13 +93,26 @@ class Agent{
 		std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::TaskResult>> goal_handle);	
 
 
+
+
   public:
     //Constructors
-    Agent();
-	Agent(Planner* planner, std::string id, std::string type, rclcpp::Time first_beacon_time,
-		  mission_planner::msg::AgentBeacon first_beacon);
-    Agent(const Agent& a);
-    ~Agent();
+	Agent();
+	Agent(Planner* planner, 
+			std::string id, 
+			std::string type, 
+			rclcpp::Time first_beacon_time,
+			mission_planner::msg::AgentBeacon first_beacon);
+	
+	// Eliminar copy constructor y assignment operator
+	Agent(const Agent&) = delete;
+	Agent& operator=(const Agent&) = delete;
+	
+	// Mantener move constructor
+	Agent(Agent&&) = default;
+	Agent& operator=(Agent&&) = default;
+	
+	~Agent();
 
     //Topic methods
 	void updateSensorsInformation();
@@ -138,8 +151,11 @@ class Agent{
 	//void batteryEnoughCB(const mission_planner::action::BatteryEnough_Goal::ConstPtr& goal);
 	//void taskResultCB(const mission_planner::action::TaskResult_Goal::ConstPtr& goal);
 
+
     //Visualization method
     void print(std::ostream& os);
+
+
 };
 
 std::ostream& operator << (std::ostream& os, Agent& a){
@@ -194,6 +210,9 @@ class Planner : public rclcpp::Node {
 	std::vector <std::string> inspect_tasks_;
 	std::vector <std::string> monitor_tasks_;
 
+	bool action_server_checked_;
+	rclcpp::TimerBase::SharedPtr check_server_timer_;
+
   protected:
     void readConfigFile(std::string config_file);
 
@@ -219,11 +238,16 @@ class Planner : public rclcpp::Node {
 	bool updateTaskParams(const std::shared_ptr<const mission_planner::action::NewTask::Goal> goal);
 	void checkBeaconsTimeout(rclcpp::Time now);
 	
+	void handleHeuristicPlanningResult(const rclcpp_action::ClientGoalHandle<mission_planner::action::HeuristicPlanning>::WrappedResult & result);
+
 	//Getters
 	bool getMissionOver();
 
 	// Others
 	bool isTopicAvailable(const std::string &topic_name);
+
+	void checkActionServer();
+
 };
 
 struct Cost{

@@ -1995,10 +1995,12 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
   // Action server para recibir TaskList
   ntl_as_ = rclcpp_action::create_server<mission_planner::action::NewTaskList>(
     this,
-    "task_list",
+    "/" + beacon_.id + "/task_list",
     std::bind(&AgentNode::handleNewTaskListGoal, this, std::placeholders::_1, std::placeholders::_2),
     std::bind(&AgentNode::handleNewTaskListCancel, this, std::placeholders::_1),
     std::bind(&AgentNode::handleNewTaskListAccepted, this, std::placeholders::_1));
+
+  RCLCPP_INFO(this->get_logger(), "🟢 Agent Behaviour Manager LISTO para recibir tareas");
 
   // Action client para Battery Enough
   battery_ac_ = rclcpp_action::create_client<mission_planner::action::BatteryEnough>(
@@ -2006,15 +2008,15 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
     "/" + beacon_.id + "/battery_enough");
 
   // Aerostack2 action clients
-takeoff_ac_ = rclcpp_action::create_client<as2_msgs::action::Takeoff>(
+  takeoff_ac_ = rclcpp_action::create_client<as2_msgs::action::Takeoff>(
     this,
     "take_off");
 
-land_ac_ = rclcpp_action::create_client<as2_msgs::action::Land>(
+  land_ac_ = rclcpp_action::create_client<as2_msgs::action::Land>(
     this,
     "land");
 
-goto_ac_ = rclcpp_action::create_client<as2_msgs::action::GoToWaypoint>(
+  goto_ac_ = rclcpp_action::create_client<as2_msgs::action::GoToWaypoint>(
     this,
     "go_to_waypoint");
 
@@ -2052,8 +2054,13 @@ goto_ac_ = rclcpp_action::create_client<as2_msgs::action::GoToWaypoint>(
     std::bind(&AgentNode::jackalPositionCallback, this, std::placeholders::_1));
 
   // Cargar archivo de configuración
-  // [Implementar readConfigFile para ROS2...]
-
+  std::string path = ament_index_cpp::get_package_share_directory("mission_planner");
+  this->declare_parameter<std::string>("config_file", path + "/config/conf.yaml");
+  std::string config_file;
+  this->get_parameter("config_file", config_file);
+  
+  RCLCPP_INFO(this->get_logger(), "🔧 Cargando configuración desde: %s", config_file.c_str());
+  readConfigFile(config_file);
   // Inicializar Behavior Tree
   // [Implementar inicialización del Behavior Tree...]
 }
@@ -2224,7 +2231,12 @@ rclcpp_action::GoalResponse AgentNode::handleNewTaskListGoal(
   const rclcpp_action::GoalUUID& uuid,
   std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal) {
   
-  RCLCPP_INFO(this->get_logger(), "[handleNewTaskListGoal] Received a NewTaskList Action");
+  RCLCPP_INFO(this->get_logger(), "🎯 [handleNewTaskListGoal] GOAL RECIBIDO!");
+  RCLCPP_INFO(this->get_logger(), "📨 Agent ID del goal: %s", goal->agent_id.c_str());
+  RCLCPP_INFO(this->get_logger(), "📊 Número de tareas: %zu", goal->task_list.size());
+
+  RCLCPP_INFO(this->get_logger(), "✅ Goal ACEPTADO");
+  
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -2236,34 +2248,122 @@ rclcpp_action::CancelResponse AgentNode::handleNewTaskListCancel(
 }
 
 void AgentNode::handleNewTaskListAccepted(
-  const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTaskList>> goal_handle) {
+  const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTaskList>> goal_handle)
+{
+  RCLCPP_INFO(this->get_logger(), "🚀 [handleNewTaskListAccepted] PROCESANDO NUEVA LISTA DE TAREAS!");
   
-  // Procesar la lista de tareas (similar a la función original newTaskList)
-  auto goal = goal_handle->get_goal();
+  // Ejecutar en un thread separado
+  std::thread([this, goal_handle]() {
+    auto goal = goal_handle->get_goal();
+    
+    RCLCPP_INFO(this->get_logger(), "📋 Procesando %zu tareas para el agente %s", 
+                goal->task_list.size(), goal->agent_id.c_str());
+
+    // Procesar cada tarea
+    for (const auto& task_msg : goal->task_list) {
+      RCLCPP_INFO(this->get_logger(), "🎯 Tarea: %s, Tipo: %c", 
+                  task_msg.id.c_str(), task_msg.type);
+    }
+
+    // Vaciar la cola actual y añadir nuevas tareas
+    emptyTheQueue();
+    
+for (const auto& task_msg : goal->task_list) {
+  classes::Task* task = nullptr;
   
-  if(beacon_.id != goal->agent_id) {
-    RCLCPP_INFO(this->get_logger(), "[handleNewTaskListAccepted] Received wrong list. Incorrect agent ID");
+  // CREAR LA TAREA SEGÚN EL TIPO
+  switch(task_msg.type) {
+    case 'M': case 'm': {
+      // Buscar el human target
+      auto human_itr = human_targets_.find(task_msg.monitor.human_target_id);
+      if (human_itr != human_targets_.end()) {
+        task = new classes::Monitor(task_msg.id, 
+                                  &human_itr->second, 
+                                  task_msg.monitor.distance, 
+                                  task_msg.monitor.number);
+        RCLCPP_INFO(this->get_logger(), "👤 Monitor task creada para human: %s", 
+                    task_msg.monitor.human_target_id.c_str());
+      } else {
+        RCLCPP_ERROR(this->get_logger(), "❌ Human target NO encontrado: %s", 
+                     task_msg.monitor.human_target_id.c_str());
+      }
+      break;
+    }
+    
+    case 'F': case 'f': {
+      task = new classes::MonitorUGV(task_msg.id, 
+                                   task_msg.monitor_ugv.ugv_id, 
+                                   task_msg.monitor_ugv.height);
+      RCLCPP_INFO(this->get_logger(), "🤖 MonitorUGV task creada para UGV: %s", 
+                  task_msg.monitor_ugv.ugv_id.c_str());
+      break;
+    }
+    
+    case 'I': case 'i': {
+      task = new classes::Inspect(task_msg.id, 
+                                task_msg.inspect.waypoints);
+      RCLCPP_INFO(this->get_logger(), "📸 Inspect task creada con %zu waypoints", 
+                  task_msg.inspect.waypoints.size());
+      break;
+    }
+    
+    case 'A': case 'a': {
+      task = new classes::InspectPVArray(task_msg.id, 
+                                       task_msg.inspect.waypoints);
+      RCLCPP_INFO(this->get_logger(), "🔋 InspectPVArray task creada con %zu waypoints", 
+                  task_msg.inspect.waypoints.size());
+      break;
+    }
+    
+    case 'D': case 'd': {
+      // Buscar tool y human target
+      auto tool_itr = tools_.find(task_msg.deliver.tool_id);
+      auto human_itr = human_targets_.find(task_msg.deliver.human_target_id);
+      
+      if (tool_itr != tools_.end() && human_itr != human_targets_.end()) {
+        task = new classes::DeliverTool(task_msg.id, 
+                                      &tool_itr->second, 
+                                      &human_itr->second);
+        RCLCPP_INFO(this->get_logger(), "📦 DeliverTool task creada - Tool: %s, Human: %s", 
+                    task_msg.deliver.tool_id.c_str(), task_msg.deliver.human_target_id.c_str());
+      } else {
+        RCLCPP_ERROR(this->get_logger(), "❌ Tool o Human target NO encontrado");
+      }
+      break;
+    }
+    
+    case 'R': case 'r': {
+      // Para tareas de recarga, necesitarías crear classes::Recharge
+      RCLCPP_WARN(this->get_logger(), "⚠️ Tipo de tarea Recharge no implementado aún");
+      break;
+    }
+    
+    case 'W': case 'w': {
+      // Para tareas de espera
+      RCLCPP_INFO(this->get_logger(), "⏳ Wait task creada");
+      // task = new classes::Wait(task_msg.id); // Si tienes esta clase
+      break;
+    }
+    
+    default:
+      RCLCPP_WARN(this->get_logger(), "⚠️ Tipo de tarea desconocido: %c", task_msg.type);
+      break;
+    }
+
+      if(task) {
+        addTaskToQueue(task);
+        RCLCPP_INFO(this->get_logger(), "✅ Tarea %s añadida a la cola", task_msg.id.c_str());
+      }
+    }
+
     auto result = std::make_shared<mission_planner::action::NewTaskList::Result>();
-    result->ack = false;
-    goal_handle->abort(result);
-    return;
-  }
-  
-  // Procesar la lista de tareas...
-  emptyTheQueue();
-  
-  for(const auto& task_msg : goal->task_list) {
-    classes::Task* task;
-    // Crear tareas según el tipo...
-    // [Implementar lógica de creación de tareas]
-    addTaskToQueue(task);
-  }
-  
-  auto result = std::make_shared<mission_planner::action::NewTaskList::Result>();
-  result->ack = true;
-  goal_handle->succeed(result);
-  
-  infoQueue();
+    result->ack = true;
+    goal_handle->succeed(result);
+    
+    RCLCPP_INFO(this->get_logger(), "🎉 Lista de tareas procesada EXITOSAMENTE");
+    infoQueue(); // Mostrar estado de la cola
+    
+  }).detach();
 }
 
 // Task queue methods

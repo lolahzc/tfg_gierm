@@ -49,6 +49,8 @@
 #include "behaviortree_cpp_v3/condition_node.h"
 #include "behaviortree_cpp_v3/decorator_node.h"
 
+#include <ament_index_cpp/get_package_share_directory.hpp> 
+
 // Forward declaration
 class AgentNode;
 

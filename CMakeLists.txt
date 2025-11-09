@@ -177,6 +177,7 @@ add_agent_executable(high_level_planner high_level_planner.cpp)
 add_agent_executable(agent_behaviour_manager agent_behaviour_manager.cpp)
 add_agent_executable(battery_faker battery_faker.cpp)
 add_agent_executable(ist_ugv_faker ist_ugv_faker.cpp)
+add_agent_executable(heuristic_planner_simulator heuristic_planner_simulator.cpp)
 
 # -----------------------------------------------------------------------------
 # Finalize
