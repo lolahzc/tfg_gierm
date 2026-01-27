@@ -1,4 +1,5 @@
 #include "mission_planner/agent_behaviour_manager.hpp"
+#include "as2_msgs/msg/yaw_mode.hpp"
 
 #include <chrono>
 #include <thread>
@@ -304,145 +305,112 @@ BackToStation::BackToStation(const std::string& name, const BT::NodeConfiguratio
 BackToStation::~BackToStation(){halt();}
 void BackToStation::init(AgentNode* agent){agent_ = agent;}
 BT::PortsList BackToStation::providedPorts() {return{};}
+
 BT::NodeStatus BackToStation::tick(){
-  if(!agent_->stop(false))
-    RCLCPP_ERROR(agent_->get_logger(), "Failed to call stop");
-    
-  RCLCPP_INFO(agent_->get_logger(), "[BackToStation] Emptying the Queue...");
+  // 1. Log inicial para saber que hemos entrado (¡ESTO ES LO QUE TE FALTA!)
+  static bool first_run = true;
+  if(first_run) {
+      RCLCPP_WARN(agent_->get_logger(), "🏠 INICIANDO SECUENCIA DE RETORNO (BackToStation)...");
+      first_run = false;
+  }
+
+  // 2. Detener al agente antes de nada
+  if(!agent_->stop(false)) {
+    RCLCPP_ERROR(agent_->get_logger(), "❌ Fallo al llamar a stop en BackToStation");
+  }
+  
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  
+  // 3. Vaciar la cola de tareas para que no se distraiga
   agent_->emptyTheQueue();
 
-  int flag = 0;
-  std::string nearest_station = "station_" + agent_->id_;
+  // 4. Determinar a dónde ir (Estación o Casa por defecto)
+  std::string nearest_station = "station_" + agent_->id_; // Ej: station_0
+  float target_x = 0.0;
+  float target_y = 0.0;
+  float target_z = 2.0; // Altura segura
 
+  // Verificar si la estación existe en la configuración
+  if (agent_->known_positions_["stations"].find(nearest_station) != agent_->known_positions_["stations"].end()) {
+      auto station_pos = agent_->known_positions_["stations"][nearest_station];
+      target_x = station_pos.getX();
+      target_y = station_pos.getY();
+      target_z = station_pos.getZ() + 2.0; 
+      RCLCPP_INFO(agent_->get_logger(), "📍 Destino encontrado: %s (%.2f, %.2f)", nearest_station.c_str(), target_x, target_y);
+  } else {
+      // SI NO ENCUENTRA LA ESTACIÓN, USAREMOS EL PUNTO (0,0)
+      // Esto evita que la función falle y el dron siga trabajando
+      RCLCPP_WARN(agent_->get_logger(), "⚠️ Estación '%s' no encontrada. Volviendo al ORIGEN (0,0).", nearest_station.c_str());
+      target_x = 0.0;
+      target_y = 0.0;
+      target_z = 2.0;
+  }
+
+  // 5. Máquina de estados para Volver y Aterrizar
   while(!isHaltRequested())
   {
-    // If Agent is already in station. Land if needed and back_to_station
-    for(auto& station : agent_->known_positions_["stations"])
+    // Verificar si ya estamos cerca (en 2D)
+    classes::Position target_pos(target_x, target_y, target_z);
+    bool near_home = (classes::distance2D(agent_->position_, target_pos) < agent_->distance_error_);
+
+    switch(agent_->state_)
     {
-      if(classes::distance2D(agent_->position_, station.second) < agent_->distance_error_)
-        flag = 1;
-    }
-    if(flag)
-    {
-      switch(agent_->state_)
-      {
-        case 1: // LANDED_DISARMED
-        case 2: // LANDED_ARMED
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          return BT::NodeStatus::SUCCESS;
-          break;
-        case 4: // FLYING_AUTO
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          if(agent_->land(false))
-          {
-            while(agent_->state_ != 1 && agent_->state_ != 2)
-            {
-              if(isHaltRequested())
-                return BT::NodeStatus::IDLE;
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            RCLCPP_INFO(agent_->get_logger(), "[BackToStation] LANDED");
+      case 2: // LANDED_ARMED - Ya estamos en el suelo
+        if(near_home) {
+            RCLCPP_INFO(agent_->get_logger(), "✅ YA ESTAMOS EN CASA Y EN EL SUELO. FIN.");
+            first_run = true; // Resetear para la próxima vez
             return BT::NodeStatus::SUCCESS;
-          }
-          else
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            RCLCPP_ERROR(agent_->get_logger(), "[BackToStation] Failed to call land");
-            return BT::NodeStatus::FAILURE;
-          }
-          break;
-        case 0: // UNINITIALIZED
-        case 3: // TAKING_OFF
-        case 5: // FLYING_MANUAL
-        case 6: // LANDING
-        default:
-          break;
-      }
-    }
-    // If Agent is not in station, call go_to_waypoint
-    else
-    {
-      switch(agent_->state_)
-      {
-        case 2: // LANDED_ARMED
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          if(!agent_->take_off(agent_->take_off_height_, false))
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            RCLCPP_ERROR(agent_->get_logger(), "[BackToStation] Failed to call take_off");
-            return BT::NodeStatus::FAILURE;
-          }
-          else
-          {
-            while(agent_->state_ != 4)
-            {
-              if(isHaltRequested())
-                return BT::NodeStatus::IDLE;
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } else {
+            // Estamos en el suelo pero lejos -> Despegar
+            RCLCPP_INFO(agent_->get_logger(), "🚀 Despegando para volver a casa...");
+            if(!agent_->take_off(agent_->take_off_height_, false)) return BT::NodeStatus::FAILURE;
+            
+            // Esperar un poco
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        break;
+
+      case 4: // FLYING_AUTO - En el aire
+        if(!near_home) {
+            // Si estamos lejos, IR A CASA
+            static auto last_log = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if(std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 2) {
+                RCLCPP_INFO(agent_->get_logger(), "✈️ Viajando a casa [%.2f, %.2f]...", target_x, target_y);
+                last_log = now;
             }
-          }
-          break;
-        case 4: // FLYING_AUTO
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          if(!agent_->go_to_waypoint(agent_->known_positions_["stations"][nearest_station].getX(),
-                agent_->known_positions_["stations"][nearest_station].getY(),
-                agent_->known_positions_["stations"][nearest_station].getZ() + 1, false))
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            RCLCPP_ERROR(agent_->get_logger(), "[BackToStation] Failed to call go_to_waypoint");
-            return BT::NodeStatus::FAILURE;
-          }
-          else
-          {
-            while(!agent_->checkIfGoToServiceSucceeded(agent_->known_positions_["stations"][nearest_station].getX(),
-                  agent_->known_positions_["stations"][nearest_station].getY(),
-                  agent_->known_positions_["stations"][nearest_station].getZ() + 1))
-            {
-              if(isHaltRequested())
-                return BT::NodeStatus::IDLE;
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            // Usamos la función go_to_waypoint (que ya arreglaste con frame_id)
+            if(!agent_->go_to_waypoint(target_x, target_y, target_z, false)) {
+                RCLCPP_ERROR(agent_->get_logger(), "❌ Fallo al enviar orden de ir a casa");
             }
-          }
-          // Land in station
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          if(!agent_->land(false))
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            RCLCPP_ERROR(agent_->get_logger(), "[BackToStation] Failed to call land");
-            return BT::NodeStatus::FAILURE;
-          }
-          else
-          {
-            while(agent_->state_ != 1 && agent_->state_ != 2)
-            {
-              if(isHaltRequested())
-                return BT::NodeStatus::IDLE;
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        } 
+        else {
+            // Si ya estamos cerca -> ATERRIZAR
+            RCLCPP_INFO(agent_->get_logger(), "⬇️ Llegada confirmada. ATERRIZANDO...");
+            if(!agent_->land(false)) {
+                RCLCPP_ERROR(agent_->get_logger(), "❌ Fallo al enviar orden de aterrizaje");
+            }
+            
+            // Esperar hasta tocar suelo (Estado 1 o 2)
+            while(agent_->state_ != 1 && agent_->state_ != 2 && !isHaltRequested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
             return BT::NodeStatus::SUCCESS;
-          }
-          break;
-        case 0: // UNINITIALIZED
-        case 1: // LANDED_DISARMED
-        case 3: // TAKING_OFF
-        case 5: // FLYING_MANUAL
-        case 6: // LANDING
-        default:
-          break;
-      }
+        }
+        break;
+
+      default: // Otros estados
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        break;
     }
   }
+  
   return BT::NodeStatus::IDLE;
 }
+
 void BackToStation::halt(){
   RCLCPP_INFO(agent_->get_logger(), "[BackToStation] halt requested");
   BT::AsyncActionNode::halt();
@@ -569,52 +537,54 @@ BT::NodeStatus MonitorHumanTarget::tick(){
   classes::Task* task;
   if(agent_->task_queue_.empty())
   {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     RCLCPP_WARN(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] Task queue is empty");
     return BT::NodeStatus::FAILURE;
   }
   task = agent_->task_queue_.front();
-
   std::string task_id = task->getID();
 
   if(task->getType() != 'M')
   {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     RCLCPP_WARN(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] First task of the queue isn't type Monitor");
     return BT::NodeStatus::FAILURE;
   }
 
-  // ROS2: Usar el action client existente en AgentNode en lugar de crear uno nuevo
   auto goal = mission_planner::action::TaskResult::Goal();
 
-  //TODO: Calling Safety Monitoring lower level controllers (faked) 
   RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] Calling Lower-level controllers..."); 
-  //********************************************* FAKED *************************************************************
+  
+  // Bucle de simulación de tarea
   while(!isHaltRequested())
   {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  //TODO: As this task ends when an operator requested, its result should be either true or false according to this
-  // ROS2: Esperar que el servidor esté disponible
+  // --- CORRECCIÓN CRÍTICA: SI NOS HAN PARADO, SALIR INMEDIATAMENTE ---
+  // Esto evita que intentemos acceder a la cola mientras BackToStation la está borrando
+  if (isHaltRequested()) {
+      RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "🛑 Monitor interrumpido (Halt). Saliendo limpio.");
+      return BT::NodeStatus::IDLE;
+  }
+  // -------------------------------------------------------------------
+
   if (!agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1))) {
     RCLCPP_ERROR(rclcpp::get_logger("monitor_human_target"), "Action server not available after waiting");
   } else {
     goal.task.id = task_id;
     goal.task.type = 'M';
-    goal.result = isHaltRequested() ? 0 : 1; //TODO: Change with the result of Lower-level controllers
+    goal.result = 1; 
     agent_->task_result_ac_->async_send_goal(goal);
   }
   
   if(goal.result)
       agent_->removeTaskFromQueue(task_id, 'M');
-  RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] MONITOR TASK FINISHED (%s)", goal.result ? "SUCCESS" : "FAILURE");
+  
+  RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] MONITOR TASK FINISHED SUCCESS");
   agent_->infoQueue();
   
-  return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-  //*****************************************************************************************************************
+  return BT::NodeStatus::SUCCESS;
 }
 void MonitorHumanTarget::halt(){
   RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] halt requested");
@@ -744,60 +714,47 @@ BT::NodeStatus MonitorUGV::tick(){
   classes::Task* task;
   if(agent_->task_queue_.empty())
   {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     RCLCPP_WARN(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] Task queue is empty");
     return BT::NodeStatus::FAILURE;
   }
   task = agent_->task_queue_.front();
-
   std::string task_id = task->getID();
-
-  if(task->getType() != 'F')
-  {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] First task of the queue isn't type MonitorUGV");
-    return BT::NodeStatus::FAILURE;
-  }
   float height = task->getHeight();
 
-  // ROS2: Usar el action client existente en AgentNode
   auto goal = mission_planner::action::TaskResult::Goal();
 
   RCLCPP_INFO(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] Calling Lower-level controllers..."); 
   while(!isHaltRequested())
   {
-    //RCLCPP_INFO_STREAM(rclcpp::get_logger("monitor_ugv"), "Trying to reach point: " << agent_->atrvjr_pose_);
     if(!agent_->go_to_waypoint(agent_->atrvjr_pose_.getX(), agent_->atrvjr_pose_.getY(), height, false))
     {
-      if(isHaltRequested())
-      {
-        //RCLCPP_WARN(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] Halted");
-        break;
-      }
-      RCLCPP_ERROR(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] Failed to call service go_to_waypoint");
+      if(isHaltRequested()) break;
       return BT::NodeStatus::FAILURE;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
 
-  // ROS2: Usar el action client existente
+  // --- CORRECCIÓN CRÍTICA ---
+  if (isHaltRequested()) {
+      return BT::NodeStatus::IDLE;
+  }
+  // -------------------------
+
   if (!agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1))) {
     RCLCPP_ERROR(rclcpp::get_logger("monitor_ugv"), "Action server not available after waiting");
   } else {
     goal.task.id = task_id;
     goal.task.type = 'F';
-    goal.result = isHaltRequested() ? 0 : 1; 
+    goal.result = 1; 
     agent_->task_result_ac_->async_send_goal(goal);
   }
   
   if(goal.result)
       agent_->removeTaskFromQueue(task_id, 'F');
-  RCLCPP_INFO(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] MONITOR UGV TASK FINISHED (%s)", goal.result ? "SUCCESS" : "FAILURE");
-  agent_->infoQueue();
   
-  return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
+  agent_->infoQueue();
+  return BT::NodeStatus::SUCCESS;
 }
 void MonitorUGV::halt(){
   RCLCPP_INFO(rclcpp::get_logger("monitor_ugv"), "[MonitorUGV] halt requested");
@@ -940,53 +897,41 @@ BT::NodeStatus TakeImage::tick(){
   classes::Task* task;
   if(agent_->task_queue_.empty())
   {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("take_image"), "[TakeImage] Task queue is empty");
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     return BT::NodeStatus::FAILURE;
   }
   task = agent_->task_queue_.front();
-
   std::string task_id = task->getID();
 
-  if(task->getType() != 'I')
-  {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("take_image"), "[TakeImage] First task of the queue isn't type Inspect");
-    return BT::NodeStatus::FAILURE;
-  }
-
-  // ROS2: Usar el action client existente en AgentNode
   auto goal = mission_planner::action::TaskResult::Goal();
 
-  //TODO: Calling Inspection lower level controllers (faked) 
   RCLCPP_INFO(rclcpp::get_logger("take_image"), "[TakeImage] Calling Lower-level controllers...");
-  //********************************************* FAKED *************************************************************
   for(int i = 0; i <= 1000; i++)
   {
-    if(isHaltRequested())
-      break;
+    if(isHaltRequested()) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  // ROS2: Usar el action client existente
+  // --- CORRECCIÓN CRÍTICA ---
+  if (isHaltRequested()) {
+      return BT::NodeStatus::IDLE;
+  }
+  // -------------------------
+
   if (!agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1))) {
-    RCLCPP_ERROR(rclcpp::get_logger("take_image"), "Action server not available after waiting");
+    RCLCPP_ERROR(rclcpp::get_logger("take_image"), "Action server not available");
   } else {
     goal.task.id = task_id;
     goal.task.type = 'I';
-    goal.result = isHaltRequested() ? 0 : 1; //TODO: Change with the result of Lower-level controllers
+    goal.result = 1; 
     agent_->task_result_ac_->async_send_goal(goal);
   }
   
   if(goal.result)
       agent_->removeTaskFromQueue(task_id, 'I');
-  RCLCPP_INFO(rclcpp::get_logger("take_image"), "[TakeImage] INSPECT TASK FINISHED (%s)", goal.result ? "SUCCESS" : "FAILURE");
+  
   agent_->infoQueue();
-
-  return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-  //*****************************************************************************************************************
+  return BT::NodeStatus::SUCCESS;
 }
 void TakeImage::halt(){
   RCLCPP_INFO(rclcpp::get_logger("take_image"), "[TakeImage] halt requested");
@@ -2011,22 +1956,22 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
   // Aerostack2 action clients
   takeoff_ac_ = rclcpp_action::create_client<as2_msgs::action::Takeoff>(
     this,
-    "take_off");
+    "/" + beacon_.id + "/TakeoffBehavior");
 
   land_ac_ = rclcpp_action::create_client<as2_msgs::action::Land>(
     this,
-    "land");
+    "/" + beacon_.id + "/LandBehavior");
 
   goto_ac_ = rclcpp_action::create_client<as2_msgs::action::GoToWaypoint>(
     this,
-    "go_to_waypoint");
+    "/" + beacon_.id + "/GoToBehavior");
 
   // Publishers
   beacon_pub_ = this->create_publisher<mission_planner::msg::AgentBeacon>("/agent_beacon", 1);
 
   // Subscribers
   position_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-    pose_topic_, 1,
+    pose_topic_, rclcpp::SensorDataQoS(),
     std::bind(&AgentNode::positionCallback, this, std::placeholders::_1));
     
   battery_sub_ = this->create_subscription<sensor_msgs::msg::BatteryState>(
@@ -2226,15 +2171,19 @@ void AgentNode::initializeBTNodes() {
 void AgentNode::executeBehaviorTree() {
     RCLCPP_INFO(this->get_logger(), "🔄 Iniciando ejecución del Behavior Tree...");
     
-    // Añadir logger para debug (opcional)
-    BT::StdCoutLogger logger_cout(tree_);
-    
-    while (rclcpp::ok() && bt_running_ && !mission_over_) {
+    // CORRECCIÓN: Quitamos "!mission_over_" para que el BT siga pensando y pueda ejecutar BackToStation
+    while (rclcpp::ok() && bt_running_) {
         try {
             // Ejecutar un tick del BT
             BT::NodeStatus status = tree_.tickRoot();
             
-            // Log del estado cada cierto tiempo para no saturar
+            // Si la misión acabó y el BT devuelve SUCCESS (significa que BackToStation terminó)
+            if (mission_over_ && status == BT::NodeStatus::SUCCESS) {
+                RCLCPP_INFO(this->get_logger(), "🏁 Misión terminada y dron en casa. Deteniendo BT.");
+                break; // AHORA SÍ podemos parar
+            }
+
+            // Log del estado cada cierto tiempo
             static auto last_log = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 5) {
@@ -2242,7 +2191,6 @@ void AgentNode::executeBehaviorTree() {
                 last_log = now;
             }
             
-            // Pequeña pausa para no saturar la CPU
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             
         } catch (const std::exception& e) {
@@ -2272,36 +2220,56 @@ void AgentNode::batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr 
 }
 
 void AgentNode::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPtr info) {
-    // Mapear estados de Aerostack2 a los estados originales
-    // info->status es de tipo as2_msgs::msg::PlatformStatus
-    switch (info->status.state) {  // Acceder al campo 'state' dentro de PlatformStatus
+    // Variable para ver si cambiamos de estado
+    int old_state = state_;
+
+    switch (info->status.state) {
         case as2_msgs::msg::PlatformStatus::LANDED:
-            state_ = 1; // LANDED_DISARMED
+            // SI está armado -> Estado 2 (Listo para despegar)
+            // NO está armado -> Estado 1 (Apagado)
+            if(info->armed) {
+                state_ = 2; // LANDED_ARMED
+            } else {
+                state_ = 1; // LANDED_DISARMED
+            }
             break;
+            
         case as2_msgs::msg::PlatformStatus::TAKING_OFF:
-            state_ = 3; // TAKING_OFF
+            state_ = 3;
             break;
         case as2_msgs::msg::PlatformStatus::FLYING:
-            state_ = 4; // FLYING_AUTO
+            state_ = 4;
             break;
         case as2_msgs::msg::PlatformStatus::LANDING:
-            state_ = 6; // LANDING
+            state_ = 6;
             break;
         case as2_msgs::msg::PlatformStatus::EMERGENCY:
-            state_ = 5; // FLYING_MANUAL (como estado de emergencia)
+            state_ = 5;
             break;
         default:
-            state_ = 0; // UNINITIALIZED
+            state_ = 0;
             break;
     }
-    
-    // Opcional: también puedes loguear el estado para debugging
-    RCLCPP_DEBUG(this->get_logger(), "Platform state: %d -> Mapped state: %d", 
-                 info->status.state, state_);
+
+    // LOG DE DEPURACIÓN: Solo imprime si el estado cambia (para no llenar la pantalla)
+    if (state_ != old_state) {
+        RCLCPP_WARN(this->get_logger(), "📢 CAMBIO DE ESTADO DETECTADO: %d -> %d (Armed: %s)", 
+            old_state, state_, info->armed ? "SI" : "NO");
+    }
+    // Imprime una vez al principio para asegurar que recibimos datos
+    static bool first_run = true;
+    if(first_run) {
+        RCLCPP_WARN(this->get_logger(), "📢 Recibiendo info del dron. Estado inicial: %d", state_);
+        first_run = false;
+    }
 }
 
 void AgentNode::missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value) {
   mission_over_ = value->value;
+  if(mission_over_) {
+      RCLCPP_WARN(this->get_logger(), "🚨 ¡ALERTA! SE HA RECIBIDO LA ORDEN: MISSION OVER");
+      RCLCPP_WARN(this->get_logger(), "🛑 Cancelando tareas y volviendo a casa...");
+  }
 }
 
 void AgentNode::beaconCallback(const mission_planner::msg::PlannerBeacon::SharedPtr beacon) {
@@ -2333,78 +2301,87 @@ void AgentNode::jackalPositionCallback(const geographic_msgs::msg::GeoPoseStampe
 
 // Aerostack2 Action calls
 bool AgentNode::land(bool blocking) {
+  // 1. Seguridad: Esperar conexión
+  if (!land_ac_->wait_for_action_server(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(this->get_logger(), "❌ Land Server no responde en /%s/LandBehavior", beacon_.id.c_str());
+    return false;
+  }
+
   auto goal_msg = as2_msgs::action::Land::Goal();
+  goal_msg.land_speed = 0.5; // Velocidad de descenso suave
+  
   auto goal_options = rclcpp_action::Client<as2_msgs::action::Land>::SendGoalOptions();
   
+  RCLCPP_INFO(this->get_logger(), "🛬 ENVIANDO ATERRIZAJE...");
   auto future_goal_handle = land_ac_->async_send_goal(goal_msg, goal_options);
   
   if (blocking) {
     auto result_future = land_ac_->async_get_result(future_goal_handle.get());
-    // Esperar y verificar resultado
   }
-  
-  return true; // Simplificado para el ejemplo
+  return true; 
 }
 
 bool AgentNode::take_off(float height, bool blocking) {
+  // 1. Seguridad: Esperar conexión
+  if (!takeoff_ac_->wait_for_action_server(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(this->get_logger(), "❌ Takeoff Server no responde en /%s/TakeoffBehavior", beacon_.id.c_str());
+    return false;
+  }
+
   auto goal_msg = as2_msgs::action::Takeoff::Goal();
   goal_msg.takeoff_height = height;
+  goal_msg.takeoff_speed = 1.0; // Velocidad explícita
+  
   auto goal_options = rclcpp_action::Client<as2_msgs::action::Takeoff>::SendGoalOptions();
   
+  RCLCPP_INFO(this->get_logger(), "🚀 ENVIANDO DESPEGUE (h=%.2f)...", height);
   auto future_goal_handle = takeoff_ac_->async_send_goal(goal_msg, goal_options);
   
   if (blocking) {
     auto result_future = takeoff_ac_->async_get_result(future_goal_handle.get());
-    // Esperar y verificar resultado
   }
-  
-  return true; // Simplificado para el ejemplo
+  return true; 
 }
 
 bool AgentNode::go_to_waypoint(float x, float y, float z, bool blocking) {
-    if (!goto_ac_) {
-        RCLCPP_ERROR(get_logger(), "GoToWaypoint action client not initialized");
+  // 1. Seguridad: Esperar conexión
+  if (!goto_ac_->wait_for_action_server(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(this->get_logger(), "❌ GoTo Server no responde en /%s/GoToBehavior", beacon_.id.c_str());
+    return false;
+  }
+
+  auto goal_msg = as2_msgs::action::GoToWaypoint::Goal();
+  
+  // --- PARTE NUEVA: DEFINIR EL MARCO DE REFERENCIA ---
+  // Sin esto, el dron ignora la orden
+  goal_msg.target_pose.header.stamp = this->now();
+  goal_msg.target_pose.header.frame_id = "earth";  // <--- IMPORTANTE: Usamos "earth" para Gazebo
+  // -------------------------------------------------
+
+  // Coordenadas
+  goal_msg.target_pose.point.x = x;
+  goal_msg.target_pose.point.y = y;
+  goal_msg.target_pose.point.z = z;
+  
+  // Velocidad y Yaw
+  goal_msg.max_speed = 1.0;
+  goal_msg.yaw.mode = as2_msgs::msg::YawMode::KEEP_YAW; 
+
+  auto goal_options = rclcpp_action::Client<as2_msgs::action::GoToWaypoint>::SendGoalOptions();
+  
+  RCLCPP_INFO(this->get_logger(), "📍 MOVIENDO a [%.2f, %.2f, %.2f] en frame %s", 
+              x, y, z, goal_msg.target_pose.header.frame_id.c_str());
+  
+  auto future_goal_handle = goto_ac_->async_send_goal(goal_msg, goal_options);
+  
+  if (blocking) {
+    auto result_future = goto_ac_->async_get_result(future_goal_handle.get());
+    if(result_future.get().code != rclcpp_action::ResultCode::SUCCEEDED) {
+        RCLCPP_WARN(this->get_logger(), "⚠️ El movimiento no terminó con éxito total");
         return false;
     }
-
-    if (!goto_ac_->wait_for_action_server(std::chrono::seconds(2))) {
-        RCLCPP_ERROR(get_logger(), "GoToWaypoint action server not available");
-        return false;
-    }
-
-    auto goal_msg = as2_msgs::action::GoToWaypoint::Goal();
-    
-    // Configurar target_pose como PointStamped
-    goal_msg.target_pose.header.frame_id = pose_frame_id_;
-    goal_msg.target_pose.header.stamp = this->now();
-    goal_msg.target_pose.point.x = x;  // Usar 'point' en lugar de 'pose.position'
-    goal_msg.target_pose.point.y = y;
-    goal_msg.target_pose.point.z = z;
-    
-    // Configurar yaw mode (puedes ajustar según necesites)
-    goal_msg.yaw.mode = as2_msgs::msg::YawMode::KEEP_YAW;  // O PATH_FACING, etc.
-    
-    // Configurar velocidad máxima (opcional)
-    goal_msg.max_speed = 1.0;  // Ajusta según necesites
-    
-    auto goal_options = rclcpp_action::Client<as2_msgs::action::GoToWaypoint>::SendGoalOptions();
-    
-    auto future_goal_handle = goto_ac_->async_send_goal(goal_msg, goal_options);
-    
-    if (blocking) {
-        auto result_future = goto_ac_->async_get_result(future_goal_handle.get());
-        
-        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), result_future, std::chrono::seconds(30)) != 
-            rclcpp::FutureReturnCode::SUCCESS) {
-            RCLCPP_ERROR(get_logger(), "GoToWaypoint action failed to complete");
-            return false;
-        }
-        
-        auto result = result_future.get();
-        return result.result->go_to_success;
-    }
-    
-    return true;
+  }
+  return true; 
 }
 
 bool AgentNode::stop(bool blocking) {
@@ -2426,6 +2403,13 @@ rclcpp_action::GoalResponse AgentNode::handleNewTaskListGoal(
   const rclcpp_action::GoalUUID& uuid,
   std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal) {
   
+  // --- ESCUDO DE SEGURIDAD ---
+  if(mission_over_) {
+      RCLCPP_WARN(this->get_logger(), "⛔ GOAL RECHAZADO: La misión ha terminado. Volviendo a casa.");
+      return rclcpp_action::GoalResponse::REJECT;
+  }
+  // ---------------------------
+
   RCLCPP_INFO(this->get_logger(), "🎯 [handleNewTaskListGoal] GOAL RECIBIDO!");
   RCLCPP_INFO(this->get_logger(), "📨 Agent ID del goal: %s", goal->agent_id.c_str());
   RCLCPP_INFO(this->get_logger(), "📊 Número de tareas: %zu", goal->task_list.size());
@@ -2445,10 +2429,21 @@ rclcpp_action::CancelResponse AgentNode::handleNewTaskListCancel(
 void AgentNode::handleNewTaskListAccepted(
   const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTaskList>> goal_handle)
 {
+  if(mission_over_) {
+     auto result = std::make_shared<mission_planner::action::NewTaskList::Result>();
+     result->ack = false;
+     goal_handle->abort(result);
+     return;
+  }
+  RCLCPP_INFO(this->get_logger(), "🚀 [handleNewTaskListAccepted] PROCESANDO NUEVA LISTA DE TAREAS!");
+  
   RCLCPP_INFO(this->get_logger(), "🚀 [handleNewTaskListAccepted] PROCESANDO NUEVA LISTA DE TAREAS!");
   
   // Ejecutar en un thread separado
   std::thread([this, goal_handle]() {
+
+    if(mission_over_) return;
+    
     auto goal = goal_handle->get_goal();
     
     RCLCPP_INFO(this->get_logger(), "📋 Procesando %zu tareas para el agente %s", 

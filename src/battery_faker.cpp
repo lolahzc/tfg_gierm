@@ -66,7 +66,7 @@ BatteryFaker::BatteryFaker()
         std::bind(&BatteryFaker::controlCallback, this, std::placeholders::_1));
 
     position_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-        pose_topic_, 1,
+        pose_topic_, rclcpp::SensorDataQoS(), 
         std::bind(&BatteryFaker::positionCallback, this, std::placeholders::_1));
 
     state_sub_ = this->create_subscription<as2_msgs::msg::PlatformInfo>(

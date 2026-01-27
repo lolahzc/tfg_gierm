@@ -42,8 +42,9 @@ Agent::Agent(Planner* planner,
   nh_->get_parameter("battery_topic", battery_topic_);
 
   // Crear subscriptores
-  position_sub_ = nh_->create_subscription<geometry_msgs::msg::PoseStamped>("/" + id_ + pose_topic_, 10,
-                      std::bind(&Agent::positionCallbackAS2, this, _1));
+  position_sub_ = nh_->create_subscription<geometry_msgs::msg::PoseStamped>(
+      "/" + id_ + pose_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&Agent::positionCallbackAS2, this, _1));
 
   battery_sub_ = nh_->create_subscription<sensor_msgs::msg::BatteryState>("/" + id_ + battery_topic_, 10,
                       std::bind(&Agent::batteryCallback, this, _1));

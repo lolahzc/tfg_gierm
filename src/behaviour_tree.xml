@@ -1,19 +1,16 @@
 <root main_tree_to_execute = "MainTree" >
 
     <BehaviorTree ID="MainTree">
-        <Fallback>  <!-- Cambiar ReactiveFallback por Fallback -->
-            <Sequence>  <!-- Cambiar ReactiveSequence por Sequence -->
+        <ReactiveFallback>
+            <Sequence>
                 <MissionOver/>
                 <BackToStation/>
             </Sequence>
             <ForceRunning>
-                <Fallback>  <!-- Cambiar ReactiveFallback por Fallback -->
+                <Fallback>
                     <Sequence>
                         <IsBatteryEnough/>
-                        <Fallback>  <!-- Cambiar ReactiveFallback por Fallback -->
-                            <!-- ForceFailure>
-                                <SubTree ID="DropToolTree"/>
-                            </ForceFailure -->
+                        <Fallback>
                             <Sequence>
                                 <Inverter>
                                     <Idle/>
@@ -22,13 +19,13 @@
                             </Sequence>
                         </Fallback>
                     </Sequence>
-                    <Fallback>  <!-- Cambiar ReactiveFallback por Fallback -->
+                    <Fallback>
                         <IsBatteryFull/>
                         <SubTree ID="RechargeTree"/>
                     </Fallback>
                 </Fallback>
             </ForceRunning>
-        </Fallback>
+        </ReactiveFallback>
     </BehaviorTree>
 
     <BehaviorTree ID="DropToolTree">
