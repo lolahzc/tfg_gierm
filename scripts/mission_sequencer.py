@@ -2,19 +2,57 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from std_srvs.srv import SetBool  # <-- IMPORTANTE: Para los servicios de armar y offboard
 from mission_planner.action import NewTask
+import time
 
 class MissionSequencer(Node):
     def __init__(self):
         super().__init__('mission_sequencer')
+        # Cliente para enviar las misiones al planificador
         self._action_client = ActionClient(self, NewTask, 'incoming_task_action')
+        
+        # Clientes para automatizar el encendido de Aerostack2
+        self._offboard_client = self.create_client(SetBool, '/drone0/set_offboard_mode')
+        self._arming_client = self.create_client(SetBool, '/drone0/set_arming_state')
+
+    def arm_and_offboard(self):
+        """Activa el modo Offboard y arma el dron automáticamente."""
+        self.get_logger().info('Esperando a que los servicios de vuelo de Aerostack2 estén disponibles...')
+        self._offboard_client.wait_for_service()
+        self._arming_client.wait_for_service()
+
+        req = SetBool.Request()
+        req.data = True
+
+        # 1. Activar Offboard
+        self.get_logger().info('Activando modo Offboard...')
+        future_offboard = self._offboard_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future_offboard)
+        if future_offboard.result() is not None and future_offboard.result().success:
+            self.get_logger().info('✅ Offboard activado con éxito.')
+        else:
+            self.get_logger().warning('⚠️ Problema al activar Offboard.')
+
+        time.sleep(1) # Pequeña pausa de seguridad
+
+        # 2. Armar el dron
+        self.get_logger().info('Armando los motores...')
+        future_arming = self._arming_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future_arming)
+        if future_arming.result() is not None and future_arming.result().success:
+            self.get_logger().info('✅ Motores armados con éxito.')
+        else:
+            self.get_logger().warning('⚠️ Problema al armar los motores.')
 
     def send_mission(self):
-        self.get_logger().info('Esperando 5 segundos para la estabilidad del sistema...')
-        import time
+        # 1. PREPARAR EL DRON AUTOMÁTICAMENTE
+        self.arm_and_offboard()
+
+        self.get_logger().info('Esperando 5 segundos de estabilización antes de iniciar las misiones...')
         time.sleep(5)
         
-        # Batería de pruebas sin UGV: 4 misiones diferentes
+        # 2. LISTA DE MISIONES
         mission_tasks = [
             {
                 'id': 'tarea_monitor_1',
@@ -30,7 +68,7 @@ class MissionSequencer(Node):
             },
             {
                 'id': 'tarea_inspeccion_pv_1',
-                'type': ord('A'), # Inspect PV Array (Requiere exactamente 2 waypoints)
+                'type': ord('A'), # Inspect PV Array
                 'params': {'waypoints': [
                     {'x': 5.0, 'y': 10.0, 'z': 15.0},
                     {'x': 10.0, 'y': 10.0, 'z': 15.0}
@@ -43,21 +81,19 @@ class MissionSequencer(Node):
             }
         ]
 
-        # Enviamos todas las misiones al planificador con un pequeño retraso 
-        # para que las vaya encolando ordenadamente
+        # 3. ENVIAR MISIONES SECUENCIALMENTE
         for task_data in mission_tasks:
             self.get_logger().info(f'Enviando tarea al planificador: {task_data["id"]}')
             self.send_goal(task_data)
             time.sleep(2) 
 
-        self.get_logger().info('¡Todas las misiones enviadas con éxito! Observa el comportamiento del dron.')
+        self.get_logger().info('¡Todas las misiones enviadas con éxito! El dron ahora es completamente autónomo.')
 
     def send_goal(self, task_data):
         goal_msg = NewTask.Goal()
         goal_msg.task.id = task_data['id']
         goal_msg.task.type = task_data['type']
 
-        # Rellenar los parámetros dinámicamente según el tipo de tarea
         if task_data['type'] == ord('M'):
             goal_msg.task.monitor.human_target_id = task_data['params']['human_target_id']
             goal_msg.task.monitor.distance = float(task_data['params']['distance'])
@@ -80,9 +116,11 @@ class MissionSequencer(Node):
 def main(args=None):
     rclpy.init(args=args)
     sequencer = MissionSequencer()
+    
+    # Inicia la secuencia completa (Armar -> Offboard -> Misiones)
     sequencer.send_mission()
     
-    # Mantener vivo para procesar el envío asíncrono
+    # Mantener vivo un instante para procesar el envío de las misiones
     rclpy.spin_once(sequencer, timeout_sec=2.0)
     
     sequencer.destroy_node()
