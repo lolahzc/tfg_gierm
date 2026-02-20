@@ -60,7 +60,7 @@ Agent::Agent(Planner* planner,
       std::bind(&Agent::handleBatteryEnoughAccepted, this, std::placeholders::_1));
 
   task_result_as_ = rclcpp_action::create_server<mission_planner::action::TaskResult>(
-      nh_, 
+      planner_, // <--- ¡CAMBIO CRÍTICO AQUI! Usar planner_ en lugar de nh_
       "/" + id_ + "/task_result",
       [this](const rclcpp_action::GoalUUID & uuid, 
             std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal) {
@@ -1536,7 +1536,7 @@ void Planner::beaconCallback(const mission_planner::msg::AgentBeacon::SharedPtr 
       RCLCPP_WARN_STREAM(get_logger(), "[beaconCallback] (" << beacon->id << ") Disconnected briefly, activated the emergency " 
           << "protocol by emptying its task queue and reconnected without Planner noticing");
     
-    agent_itr->second.sendQueueToAgent();
+    // agent_itr->second.sendQueueToAgent();
   }
 }
 

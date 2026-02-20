@@ -146,13 +146,6 @@ BT::NodeStatus Recharge::tick(){
   bool recharge_task = false;
   classes::Task* task;
   float final_percentage;
-
-  auto task_result_ac_ = rclcpp_action::create_client<mission_planner::action::TaskResult>(
-    agent_->get_node_base_interface(),
-    agent_->get_node_graph_interface(),
-    agent_->get_node_logging_interface(),
-    agent_->get_node_waitables_interface(),
-    "/" + agent_->beacon_.id + "/task_result");
   
   mission_planner::action::TaskResult::Goal goal;
   
@@ -225,13 +218,13 @@ BT::NodeStatus Recharge::tick(){
       case 4: // FLYING_AUTO
         if(isHaltRequested())
         {
-          if(recharge_task)
-          {
-            if(agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1)))
-            {
-              auto goal_handle_future = agent_->task_result_ac_->async_send_goal(goal);
-            }
-          }
+          // if(recharge_task)
+          // {
+          //   if(agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1)))
+          //   {
+          //     auto goal_handle_future = agent_->task_result_ac_->async_send_goal(goal);
+          //   }
+          // }
           return BT::NodeStatus::IDLE;
         }
         if(!agent_->land(false))
@@ -424,38 +417,10 @@ GoNearHumanTarget::~GoNearHumanTarget(){halt();}
 void GoNearHumanTarget::init(AgentNode* agent){agent_ = agent;}
 BT::PortsList GoNearHumanTarget::providedPorts() {return{};}
 BT::NodeStatus GoNearHumanTarget::tick(){
-  if(!agent_->stop(false))
-    RCLCPP_ERROR(rclcpp::get_logger("go_near_human_target"), "Failed to call stop");
+  if(agent_->task_queue_.empty()) return BT::NodeStatus::FAILURE;
+  classes::Task* task = agent_->task_queue_.front();
 
-  classes::Task* task;
-  if(agent_->task_queue_.empty())
-  {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] Task queue is empty");
-    return BT::NodeStatus::FAILURE;
-  }
-  task = agent_->task_queue_.front();
-
-  float distance;
-  switch(task->getType())
-  {
-    case 'D':
-    case 'd':
-      distance = 1.5;
-      break;
-    case 'M':
-    case 'm':
-      distance = task->getDistance();
-      break;
-    default:
-      if(isHaltRequested())
-        return BT::NodeStatus::IDLE;
-      RCLCPP_WARN(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] First task of the queue isn't type Monitor");
-      return BT::NodeStatus::FAILURE;
-      break;
-  }
-
+  float distance = (task->getType() == 'M') ? task->getDistance() : 1.5;
   classes::Position human_position = task->getHumanPosition();
   classes::Position near_human_pose = classes::closePose2D(agent_->position_, human_position, distance);
 
@@ -463,56 +428,28 @@ BT::NodeStatus GoNearHumanTarget::tick(){
   {
     switch(agent_->state_)
     {
-      case 2: //LANDED_ARMED
-        if(isHaltRequested())
-          return BT::NodeStatus::IDLE;
-        if(!agent_->take_off(agent_->take_off_height_, false))
-        {
-          if(isHaltRequested())
-            return BT::NodeStatus::IDLE;
-          RCLCPP_ERROR(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] Failed to call service take_off");
-          return BT::NodeStatus::FAILURE;
-        }
-        else
-        {
-          while(agent_->state_ != 4)
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
+      case 2:
+        if(isHaltRequested()) return BT::NodeStatus::IDLE;
+        if(!agent_->take_off(agent_->take_off_height_, false)) return BT::NodeStatus::FAILURE;
+        while(agent_->state_ != 4) {
+            if(isHaltRequested()) return BT::NodeStatus::IDLE;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         break;
-      case 4: //FLYING_AUTO
-        if(isHaltRequested())
-          return BT::NodeStatus::IDLE;
-        RCLCPP_INFO(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] Moving near HT...");
-        if(agent_->go_to_waypoint(near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ(), false))
-        {
-          while(!agent_->checkIfGoToServiceSucceeded(near_human_pose.getX(), near_human_pose.getY(),
-                near_human_pose.getZ()))
-          {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
-          RCLCPP_INFO(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] Returning SUCCESS...");
-          return BT::NodeStatus::SUCCESS;
+      case 4:
+        if(isHaltRequested()) return BT::NodeStatus::IDLE;
+        if(agent_->go_to_waypoint(near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ(), false)) {
+            while(!agent_->checkIfGoToServiceSucceeded(near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ())) {
+                if(isHaltRequested()) return BT::NodeStatus::IDLE;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return BT::NodeStatus::SUCCESS;
         }
-        if(isHaltRequested())
-          return BT::NodeStatus::IDLE;
-        RCLCPP_ERROR(rclcpp::get_logger("go_near_human_target"), "[GoNearHumanTarget] Failed to call service go_to_waypoint");
         return BT::NodeStatus::FAILURE;
-        break;
-      case 0: //UNINITIALIZED
-      case 1: //LANDED_DISARMED
-      case 3: //TAKING_OFF
-      case 5: //FLIYING_MANUAL
-      case 6: //LANDING
       default:
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
     }
-    //MAYBE PUT SOME SLEEP TIME HERE ********************************************************************************
   }
   return BT::NodeStatus::IDLE;
 }
@@ -531,61 +468,39 @@ MonitorHumanTarget::~MonitorHumanTarget(){halt();}
 void MonitorHumanTarget::init(AgentNode* agent){agent_ = agent;}
 BT::PortsList MonitorHumanTarget::providedPorts() {return{};}
 BT::NodeStatus MonitorHumanTarget::tick(){
-  if(!agent_->stop(false))
-    RCLCPP_ERROR(rclcpp::get_logger("monitor_human_target"), "Failed to call stop");
-
-  classes::Task* task;
-  if(agent_->task_queue_.empty())
-  {
-    if(isHaltRequested()) return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] Task queue is empty");
-    return BT::NodeStatus::FAILURE;
-  }
-  task = agent_->task_queue_.front();
+  if(agent_->task_queue_.empty()) return BT::NodeStatus::FAILURE;
+  classes::Task* task = agent_->task_queue_.front();
   std::string task_id = task->getID();
 
-  if(task->getType() != 'M')
-  {
+  if(task->getType() != 'M') return BT::NodeStatus::FAILURE;
+
+  RCLCPP_INFO(agent_->get_logger(), "📷 [MonitorHumanTarget] Iniciando monitorización (Esperando 5 segundos)...");
+  
+  for(int i = 0; i < 50; i++) {
     if(isHaltRequested()) return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] First task of the queue isn't type Monitor");
-    return BT::NodeStatus::FAILURE;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
+  
+  RCLCPP_INFO(agent_->get_logger(), "✅ [MonitorHumanTarget] Monitorización completada.");
 
+  // Preparar mensaje de éxito
   auto goal = mission_planner::action::TaskResult::Goal();
+  goal.task.id = task_id;
+  goal.task.type = 'M';
+  goal.result = 1; 
 
-  RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] Calling Lower-level controllers..."); 
-  
-  // Bucle de simulación de tarea
-  while(!isHaltRequested())
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
-  // --- CORRECCIÓN CRÍTICA: SI NOS HAN PARADO, SALIR INMEDIATAMENTE ---
-  // Esto evita que intentemos acceder a la cola mientras BackToStation la está borrando
-  if (isHaltRequested()) {
-      RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "🛑 Monitor interrumpido (Halt). Saliendo limpio.");
-      return BT::NodeStatus::IDLE;
-  }
-  // -------------------------------------------------------------------
-
-  if (!agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1))) {
-    RCLCPP_ERROR(rclcpp::get_logger("monitor_human_target"), "Action server not available after waiting");
+  // Disparo asíncrono sin esperas usando el cliente de la clase
+  if (agent_->task_result_ac_) {
+      agent_->task_result_ac_->async_send_goal(goal);
+      RCLCPP_INFO(agent_->get_logger(), "📨 Resultado 'SUCCESS' disparado hacia el planificador.");
   } else {
-    goal.task.id = task_id;
-    goal.task.type = 'M';
-    goal.result = 1; 
-    agent_->task_result_ac_->async_send_goal(goal);
+      RCLCPP_ERROR(agent_->get_logger(), "❌ ERROR: task_result_ac_ no está inicializado.");
   }
-  
-  if(goal.result)
-      agent_->removeTaskFromQueue(task_id, 'M');
-  
-  RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] MONITOR TASK FINISHED SUCCESS");
-  agent_->infoQueue();
-  
+
+  agent_->removeTaskFromQueue(task_id, 'M');
   return BT::NodeStatus::SUCCESS;
 }
+
 void MonitorHumanTarget::halt(){
   RCLCPP_INFO(rclcpp::get_logger("monitor_human_target"), "[MonitorHumanTarget] halt requested");
   //Do some cleanup if necessary
@@ -949,170 +864,98 @@ BT::NodeStatus InspectPVArray::tick(){
   if(!agent_->stop(false))
     RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "Failed to call stop");
 
-  classes::Task* task;
-  if(agent_->task_queue_.empty())
-  {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Task queue is empty");
+  if(agent_->task_queue_.empty()) {
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     return BT::NodeStatus::FAILURE;
   }
-  task = agent_->task_queue_.front();
-
+  
+  classes::Task* task = agent_->task_queue_.front();
   std::string task_id = task->getID();
 
-  if(task->getType() != 'A')
-  {
-    if(isHaltRequested())
-      return BT::NodeStatus::IDLE;
-    RCLCPP_WARN(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] First task of the queue isn't type Inspect PV Array");
+  if(task->getType() != 'I' && task->getType() != 'A') {
+    if(isHaltRequested()) return BT::NodeStatus::IDLE;
     return BT::NodeStatus::FAILURE;
   }
 
-  // ROS2: Usar el action client existente en AgentNode
   auto goal = mission_planner::action::TaskResult::Goal();
-
-  //TODO: Calling Inspection lower level controllers (faked) 
-  RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Calling Lower-level controllers...");
-  //********************************************* FAKED *************************************************************
   auto wp = task->getInspectWaypoints();
 
-  // Función auxiliar para enviar resultado (evita duplicación de código)
   auto sendResult = [&](int result_value) {
-    if (!agent_->task_result_ac_->wait_for_action_server(std::chrono::seconds(1))) {
-      RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "Action server not available after waiting");
-    } else {
+    if (agent_->task_result_ac_) {
       goal.task.id = task_id;
-      goal.task.type = 'A';
+      goal.task.type = task->getType();
       goal.result = result_value;
       
-      // Solar Panel 3_4 - Solo enviar coordenadas en caso de éxito
-      if (result_value == 1) {
+      if (result_value == 1) { 
         geometry_msgs::msg::Point target_xyz;
-        target_xyz.x = -36.6343;
-        target_xyz.y =  62.293;
+        target_xyz.x = -36.6343; target_xyz.y = 62.293;
         geographic_msgs::msg::GeoPose target_gps;
-        target_gps.position.latitude  = -7.96213167462045;
+        target_gps.position.latitude = -7.96213167462045;
         target_gps.position.longitude = 38.54156780106911;
         goal.do_closer_inspection.xyz_coordinates.push_back(target_xyz);
         goal.do_closer_inspection.gps_coordinates.push_back(target_gps);
       }
       
       agent_->task_result_ac_->async_send_goal(goal);
+      RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "📨 Resultado de inspección disparado hacia el planificador.");
+    } else {
+      RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "❌ ERROR: task_result_ac_ no está inicializado.");
     }
-    
-    if(goal.result)
-      agent_->removeTaskFromQueue(task_id, 'A');
-    RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] INSPECT PV ARRAY TASK FINISHED (%s)", goal.result ? "SUCCESS" : "FAILURE");
-    agent_->infoQueue();
+    if(result_value == 1) agent_->removeTaskFromQueue(task_id, task->getType());
   };
+
+  if (wp.size() < 2) {
+      RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "❌ Error: Faltan waypoints en la tarea (Mínimo 2).");
+      sendResult(0);
+      return BT::NodeStatus::FAILURE;
+  }
+
+  RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "🚀 [InspectPVArray] Iniciando misión de inspección...");
 
   while(!isHaltRequested())
   {
-    switch(agent_->state_)
-    {
-      case 2: //LANDED_ARMED
-        if(isHaltRequested())
-        {
-          sendResult(isHaltRequested() ? 0 : 1);
-          return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-        }
-        if(!agent_->take_off(agent_->take_off_height_, false))
-        {
-          if(isHaltRequested())
-          {
-            sendResult(isHaltRequested() ? 0 : 1);
-            return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-          }
-          RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Failed to call service take_off");
-          sendResult(0);
-          return BT::NodeStatus::FAILURE;
-        }
-        else
-        {
-          while(agent_->state_ != 4)
-          {
-            if(isHaltRequested())
-            {
-              sendResult(isHaltRequested() ? 0 : 1);
-              return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
-        }
-        break;
-      case 4: //FLYING_AUTO
-        if(isHaltRequested())
-        {
-          sendResult(isHaltRequested() ? 0 : 1);
-          return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-        }
-        RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Moving to the beggining...");
-        if(agent_->go_to_waypoint(wp[0].x, wp[0].y, wp[0].z, false))
-        {
-          while(!agent_->checkIfGoToServiceSucceeded(wp[0].x, wp[0].y, wp[0].z))
-          {
-            if(isHaltRequested())
-            {
-              sendResult(isHaltRequested() ? 0 : 1);
-              return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          }
-          RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Moving to the end...");
-          if(agent_->go_to_waypoint(wp[1].x, wp[1].y, wp[1].z, false))
-          {
-            while(!agent_->checkIfGoToServiceSucceeded(wp[1].x, wp[1].y, wp[1].z))
-            {
-              if(isHaltRequested())
-              {
-                sendResult(isHaltRequested() ? 0 : 1);
-                return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-              }
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Returning SUCCESS...");
-            sendResult(1);
-            return BT::NodeStatus::SUCCESS;
-          }
-          else
-          {
-            if(isHaltRequested())
-            {
-              sendResult(isHaltRequested() ? 0 : 1);
-              return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-            }
-            RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Failed to call service go_to_waypoint");
+    if (agent_->state_ != 4) {
+        RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "🚁 Solicitando despegue a Aerostack2...");
+        if(!agent_->take_off(agent_->take_off_height_, false)) {
             sendResult(0);
             return BT::NodeStatus::FAILURE;
-          }
         }
-        else
-        {
-          if(isHaltRequested())
-          {
-            sendResult(isHaltRequested() ? 0 : 1);
-            return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-          }
-          RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Failed to call service go_to_waypoint");
-          sendResult(0);
-          return BT::NodeStatus::FAILURE;
+        while(agent_->state_ != 4) {
+            if(isHaltRequested()) return BT::NodeStatus::IDLE;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        break;
-      case 0: //UNINITIALIZED
-      case 1: //LANDED_DISARMED
-      case 3: //TAKING_OFF
-      case 5: //FLIYING_MANUAL
-      case 6: //LANDING
-      default:
-        break;
+    }
+
+    if (agent_->state_ == 4) {
+        RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "📍 Moviendo al PRIMER punto [%.2f, %.2f, %.2f]...", wp[0].x, wp[0].y, wp[0].z);
+        if(agent_->go_to_waypoint(wp[0].x, wp[0].y, wp[0].z, false)) {
+            while(!agent_->checkIfGoToServiceSucceeded(wp[0].x, wp[0].y, wp[0].z)) {
+                if(isHaltRequested()) return BT::NodeStatus::IDLE;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            
+            RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "📍 Moviendo al SEGUNDO punto [%.2f, %.2f, %.2f]...", wp[1].x, wp[1].y, wp[1].z);
+            if(agent_->go_to_waypoint(wp[1].x, wp[1].y, wp[1].z, false)) {
+                while(!agent_->checkIfGoToServiceSucceeded(wp[1].x, wp[1].y, wp[1].z)) {
+                    if(isHaltRequested()) return BT::NodeStatus::IDLE;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                
+                RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "✅ Inspección completada con éxito.");
+                sendResult(1);
+                return BT::NodeStatus::SUCCESS;
+            }
+        }
+        RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "❌ Fallo en la navegación.");
+        sendResult(0);
+        return BT::NodeStatus::FAILURE;
     }
   }
-
-  sendResult(isHaltRequested() ? 0 : 1);
-  return isHaltRequested() ? BT::NodeStatus::IDLE : BT::NodeStatus::SUCCESS;
-  //*****************************************************************************************************************
+  
+  return BT::NodeStatus::IDLE;
 }
+
+
 void InspectPVArray::halt(){
   RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] halt requested");
   //Do some cleanup if necessary
@@ -1948,6 +1791,11 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
 
   RCLCPP_INFO(this->get_logger(), "🟢 Agent Behaviour Manager LISTO para recibir tareas");
 
+  task_result_ac_ = rclcpp_action::create_client<mission_planner::action::TaskResult>(
+      this, 
+      "/" + beacon_.id + "/task_result"
+  );
+
   // Action client para Battery Enough
   battery_ac_ = rclcpp_action::create_client<mission_planner::action::BatteryEnough>(
     this, 
@@ -1968,6 +1816,13 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
 
   // Publishers
   beacon_pub_ = this->create_publisher<mission_planner::msg::AgentBeacon>("/agent_beacon", 1);
+
+  timer_beacon_ = this->create_wall_timer(
+    std::chrono::seconds(1), 
+    [this]() {
+        // Publicamos la estructura beacon_ que ya se inicializa en el constructor
+        this->beacon_pub_->publish(this->beacon_);
+    });
 
   // Subscribers
   position_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -2398,23 +2253,24 @@ bool AgentNode::checkIfGoToServiceSucceeded(float x, float y, float z) {
   return false;
 }
 
-// Action server callbacks
 rclcpp_action::GoalResponse AgentNode::handleNewTaskListGoal(
   const rclcpp_action::GoalUUID& uuid,
-  std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal) {
-  
-  // --- ESCUDO DE SEGURIDAD ---
+  std::shared_ptr<const mission_planner::action::NewTaskList::Goal> goal) 
+{
+  // 1. Escudo contra misiones cuando ya terminó todo
   if(mission_over_) {
-      RCLCPP_WARN(this->get_logger(), "⛔ GOAL RECHAZADO: La misión ha terminado. Volviendo a casa.");
+      RCLCPP_WARN(this->get_logger(), "⛔ GOAL RECHAZADO: La misión ha terminado.");
       return rclcpp_action::GoalResponse::REJECT;
   }
-  // ---------------------------
 
-  RCLCPP_INFO(this->get_logger(), "🎯 [handleNewTaskListGoal] GOAL RECIBIDO!");
-  RCLCPP_INFO(this->get_logger(), "📨 Agent ID del goal: %s", goal->agent_id.c_str());
-  RCLCPP_INFO(this->get_logger(), "📊 Número de tareas: %zu", goal->task_list.size());
+  // 2. Escudo contra re-asignaciones redundantes
+  if (!task_queue_.empty()) {
+      RCLCPP_WARN(this->get_logger(), "⚠️ GOAL RECHAZADO: El dron ya está ejecutando tareas. Ignorando nueva misión del planificador para evitar interrupciones (Halt).");
+      return rclcpp_action::GoalResponse::REJECT;
+  }
 
-  RCLCPP_INFO(this->get_logger(), "✅ Goal ACEPTADO");
+  RCLCPP_INFO(this->get_logger(), "🎯 [handleNewTaskListGoal] GOAL RECIBIDO y ACEPTADO!");
+  RCLCPP_INFO(this->get_logger(), "📨 Agent ID del goal: %s | Tareas: %zu", goal->agent_id.c_str(), goal->task_list.size());
   
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }

@@ -534,6 +534,7 @@ private:
     rclcpp::Publisher<mission_planner::msg::AgentBeacon>::SharedPtr beacon_pub_;
     mission_planner::msg::AgentBeacon beacon_;
     rclcpp::Rate loop_rate_;
+    rclcpp::TimerBase::SharedPtr timer_beacon_;
 
     std::queue<classes::Task*> task_queue_;
     bool battery_enough_;

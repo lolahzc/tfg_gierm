@@ -137,6 +137,8 @@ install(DIRECTORY
   FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
 
+install(PROGRAMS scripts/mission_sequencer.py DESTINATION lib/${PROJECT_NAME})
+
 # Install config files (si tienes)
 install(DIRECTORY
   config
@@ -168,7 +170,7 @@ function(add_agent_executable exe_name src_file)
     as2_msgs
     geographic_msgs
     builtin_interfaces
-    
+    ament_index_cpp
   )
   target_link_libraries(${exe_name} ${PROJECT_NAME}_core)
   if(yaml-cpp_FOUND)
