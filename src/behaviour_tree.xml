@@ -17,6 +17,10 @@
                                 </Inverter>
                                 <SubTree ID="PerformTaskTree"/>
                             </Sequence>
+                            <ReactiveSequence>
+                                <Idle/>
+                                <BackToStation/>
+                            </ReactiveSequence>
                         </Fallback>
                     </Sequence>
                     <Fallback>
