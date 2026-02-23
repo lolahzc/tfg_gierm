@@ -1897,19 +1897,15 @@ void AgentNode::initializeBTNodes() {
 void AgentNode::executeBehaviorTree() {
     RCLCPP_INFO(this->get_logger(), "🔄 Iniciando ejecución del Behavior Tree...");
     
-    // CORRECCIÓN: Quitamos "!mission_over_" para que el BT siga pensando y pueda ejecutar BackToStation
     while (rclcpp::ok() && bt_running_) {
         try {
-            // Ejecutar un tick del BT
             BT::NodeStatus status = tree_.tickRoot();
             
-            // Si la misión acabó y el BT devuelve SUCCESS (significa que BackToStation terminó)
             if (mission_over_ && status == BT::NodeStatus::SUCCESS) {
                 RCLCPP_INFO(this->get_logger(), "🏁 Misión terminada y dron en casa. Deteniendo BT.");
-                break; // AHORA SÍ podemos parar
+                break;
             }
 
-            // Log del estado cada cierto tiempo
             static auto last_log = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 5) {
@@ -1936,7 +1932,6 @@ AgentNode::~AgentNode()
   }
 }
 
-// Callbacks
 void AgentNode::positionCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose) {
   position_.update(pose->pose.position.x, pose->pose.position.y, pose->pose.position.z);
 }
@@ -1946,7 +1941,6 @@ void AgentNode::batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr 
 }
 
 void AgentNode::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPtr info) {
-    // Variable para ver si cambiamos de estado
     int old_state = state_;
 
     switch (info->status.state) {
@@ -1977,12 +1971,10 @@ void AgentNode::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPt
             break;
     }
 
-    // LOG DE DEPURACIÓN: Solo imprime si el estado cambia (para no llenar la pantalla)
     if (state_ != old_state) {
         RCLCPP_WARN(this->get_logger(), "📢 CAMBIO DE ESTADO DETECTADO: %d -> %d (Armed: %s)", 
             old_state, state_, info->armed ? "SI" : "NO");
     }
-    // Imprime una vez al principio para asegurar que recibimos datos
     static bool first_run = true;
     if(first_run) {
         RCLCPP_WARN(this->get_logger(), "📢 Recibiendo info del dron. Estado inicial: %d", state_);
@@ -2078,18 +2070,13 @@ bool AgentNode::go_to_waypoint(float x, float y, float z, bool blocking) {
 
   auto goal_msg = as2_msgs::action::GoToWaypoint::Goal();
   
-  // --- PARTE NUEVA: DEFINIR EL MARCO DE REFERENCIA ---
-  // Sin esto, el dron ignora la orden
   goal_msg.target_pose.header.stamp = this->now();
-  goal_msg.target_pose.header.frame_id = "earth";  // <--- IMPORTANTE: Usamos "earth" para Gazebo
-  // -------------------------------------------------
+  goal_msg.target_pose.header.frame_id = "earth";  
 
-  // Coordenadas
   goal_msg.target_pose.point.x = x;
   goal_msg.target_pose.point.y = y;
   goal_msg.target_pose.point.z = z;
   
-  // Velocidad y Yaw
   goal_msg.max_speed = 1.0;
   goal_msg.yaw.mode = as2_msgs::msg::YawMode::KEEP_YAW; 
 

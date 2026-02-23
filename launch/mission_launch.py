@@ -9,13 +9,15 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('mission_planner')
     default_config_file = os.path.join(pkg_share, 'config', 'conf.yaml')
 
-    uav_id_arg = DeclareLaunchArgument('uav_id', default_value='0')
+    # 1. Argumentos de lanzamiento
+    # Cambiado el default a 'drone0' para evitar errores de nombres que empiezan por número
+    uav_id_arg = DeclareLaunchArgument('uav_id', default_value='drone0')
     config_file_arg = DeclareLaunchArgument('config_file', default_value=default_config_file)
 
-    # --- SOLUCIÓN AL ERROR DE TIPO ---
-    # Esta expresión envuelve el valor en comillas extra para que ROS lo vea como "0" (string) y no 0 (int)
+    # Expresión para forzar que el ID sea tratado siempre como string en ROS 2
     uav_id_str = PythonExpression(["'\"' + '", LaunchConfiguration('uav_id'), "' + '\"'"])
 
+    # 2. Definición de Nodos
     planner_node = Node(
         package='mission_planner',
         executable='high_level_planner',
@@ -25,26 +27,20 @@ def generate_launch_description():
     )
 
     heuristic_sim_node = Node(
-        package='mission_planner', executable='heuristic_planner_simulator',
-        name='heuristic_planner_simulator', output='screen'
-    )
-
-    battery_faker_node = Node(
-        package='mission_planner', executable='battery_faker', name='battery_faker',
-        output='screen',
-        parameters=[{
-            'id': uav_id_str, # <--- Usamos la cadena forzada
-            'battery_mode': 'recharge_in_base',
-            'config_file': LaunchConfiguration('config_file')
-        }]
+        package='mission_planner', 
+        executable='heuristic_planner_simulator',
+        name='heuristic_planner_simulator', 
+        output='screen'
     )
 
     agent_bt_node = Node(
-        package='mission_planner', executable='agent_behaviour_manager',
+        package='mission_planner', 
+        executable='agent_behaviour_manager',
+        # El nombre del nodo será agent_behaviour_manager_drone0
         name=['agent_behaviour_manager_', LaunchConfiguration('uav_id')],
         output='screen',
         parameters=[{
-            'id': uav_id_str, # <--- Usamos la cadena forzada
+            'id': uav_id_str, 
             'ns_prefix': '',
             'pose_frame_id': 'earth', 
             'take_off_height': 5.0,
@@ -52,12 +48,32 @@ def generate_launch_description():
         }]
     )
 
-    mission_sequencer_node = Node(
-        package='mission_planner', executable='mission_sequencer.py',
-        name='mission_sequencer', output='screen'
+    battery_faker_node = Node(
+        package='mission_planner',
+        executable='battery_faker',
+        name='battery_faker',
+        output='screen',
+        parameters=[{
+            'id': uav_id_str, # Usamos el mismo ID dinámico que el manager
+            'battery_mode': 'recharge_in_base',
+            'config_file': LaunchConfiguration('config_file')
+        }]
     )
 
+    mission_sequencer_node = Node(
+        package='mission_planner', 
+        executable='mission_sequencer.py',
+        name='mission_sequencer', 
+        output='screen'
+    )
+
+    # 3. Retornar la descripción con los nodos únicos
     return LaunchDescription([
-        uav_id_arg, config_file_arg, planner_node,
-        heuristic_sim_node, battery_faker_node, agent_bt_node, mission_sequencer_node
+        uav_id_arg, 
+        config_file_arg, 
+        planner_node,
+        heuristic_sim_node, 
+        agent_bt_node, 
+        battery_faker_node,
+        mission_sequencer_node
     ])

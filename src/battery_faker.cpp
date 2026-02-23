@@ -7,12 +7,14 @@
 BatteryFaker::BatteryFaker() 
   : Node("battery_faker"),
     loop_rate_(0.2),
-    battery_increase_(0.001f),
-    battery_decrease_(0.001f)
+    // battery_increase_(0.001f),
+    // battery_decrease_(0.001f)
+    battery_increase_(0.05f), // Carga muy rápida (5% cada medio segundo)
+    battery_decrease_(0.02f)  // Descarga rápida (2% cada medio segundo)
 {
     // Declarar todos los parámetros
     this->declare_parameter<std::string>("battery_mode", "static");
-    this->declare_parameter<std::string>("id", "uav0");  // Valor por defecto específico
+    this->declare_parameter<std::string>("id", "drone0");  // Valor por defecto específico
     this->declare_parameter<std::string>("pose_topic", "");
     this->declare_parameter<std::string>("state_topic", "");
     this->declare_parameter<std::string>("config_file", "");
@@ -58,7 +60,7 @@ BatteryFaker::BatteryFaker()
 
     // Publishers
     battery_pub_ = this->create_publisher<sensor_msgs::msg::BatteryState>(
-        "/" + id_ + "/battery_fake", 1);
+    "/" + id_ + "/sensor_measurements/battery", 1);
 
     // Subscribers
     control_sub_ = this->create_subscription<mission_planner::msg::BatteryControl>(

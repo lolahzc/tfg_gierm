@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from std_srvs.srv import SetBool  # <-- IMPORTANTE: Para los servicios de armar y offboard
+from std_srvs.srv import SetBool  
 from mission_planner.action import NewTask
 import time
 
@@ -12,7 +12,6 @@ class MissionSequencer(Node):
         # Cliente para enviar las misiones al planificador
         self._action_client = ActionClient(self, NewTask, 'incoming_task_action')
         
-        # Clientes para automatizar el encendido de Aerostack2
         self._offboard_client = self.create_client(SetBool, '/drone0/set_offboard_mode')
         self._arming_client = self.create_client(SetBool, '/drone0/set_arming_state')
 
@@ -25,7 +24,6 @@ class MissionSequencer(Node):
         req = SetBool.Request()
         req.data = True
 
-        # 1. Activar Offboard
         self.get_logger().info('Activando modo Offboard...')
         future_offboard = self._offboard_client.call_async(req)
         rclpy.spin_until_future_complete(self, future_offboard)
@@ -34,9 +32,8 @@ class MissionSequencer(Node):
         else:
             self.get_logger().warning('⚠️ Problema al activar Offboard.')
 
-        time.sleep(1) # Pequeña pausa de seguridad
+        time.sleep(1) 
 
-        # 2. Armar el dron
         self.get_logger().info('Armando los motores...')
         future_arming = self._arming_client.call_async(req)
         rclpy.spin_until_future_complete(self, future_arming)
@@ -46,13 +43,11 @@ class MissionSequencer(Node):
             self.get_logger().warning('⚠️ Problema al armar los motores.')
 
     def send_mission(self):
-        # 1. PREPARAR EL DRON AUTOMÁTICAMENTE
         self.arm_and_offboard()
 
         self.get_logger().info('Esperando 5 segundos de estabilización antes de iniciar las misiones...')
         time.sleep(5)
         
-        # 2. LISTA DE MISIONES
         mission_tasks = [
             {
                 'id': 'tarea_monitor_1',
@@ -63,7 +58,7 @@ class MissionSequencer(Node):
                 'id': 'tarea_inspeccion_1',
                 'type': ord('I'), # Inspect normal
                 'params': {'waypoints': [
-                    {'x': -15.0, 'y': 0.0, 'z': 10.0}
+                    {'x': 15.0, 'y': 10.0, 'z': 10.0}
                 ]}
             },
             {
@@ -81,7 +76,6 @@ class MissionSequencer(Node):
             }
         ]
 
-        # 3. ENVIAR MISIONES SECUENCIALMENTE
         for task_data in mission_tasks:
             self.get_logger().info(f'Enviando tarea al planificador: {task_data["id"]}')
             self.send_goal(task_data)
@@ -120,7 +114,6 @@ def main(args=None):
     # Inicia la secuencia completa (Armar -> Offboard -> Misiones)
     sequencer.send_mission()
     
-    # Mantener vivo un instante para procesar el envío de las misiones
     rclpy.spin_once(sequencer, timeout_sec=2.0)
     
     sequencer.destroy_node()
