@@ -4,46 +4,51 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from std_srvs.srv import SetBool  
 from mission_planner.action import NewTask
+from mission_planner.msg import Waypoint
 import time
 
 class MissionSequencer(Node):
     def __init__(self):
         super().__init__('mission_sequencer')
+        
+        # 1. Leer el número de drones del Launch File
+        self.declare_parameter('n_drones', 3)
+        self.n_drones = self.get_parameter('n_drones').value
+        self.drone_ids = [f'drone{i}' for i in range(self.n_drones)]
+        
         # Cliente para enviar las misiones al planificador
         self._action_client = ActionClient(self, NewTask, 'incoming_task_action')
         
-        self._offboard_client = self.create_client(SetBool, '/drone0/set_offboard_mode')
-        self._arming_client = self.create_client(SetBool, '/drone0/set_arming_state')
+        # 2. Crear diccionarios de clientes para TODOS los drones, no solo drone0
+        self.arming_clients = {}
+        self.offboard_clients = {}
+        
+        for d_id in self.drone_ids:
+            self.offboard_clients[d_id] = self.create_client(SetBool, f'/{d_id}/set_offboard_mode')
+            self.arming_clients[d_id] = self.create_client(SetBool, f'/{d_id}/set_arming_state')
 
-    def arm_and_offboard(self):
-        """Activa el modo Offboard y arma el dron automáticamente."""
-        self.get_logger().info('Esperando a que los servicios de vuelo de Aerostack2 estén disponibles...')
-        self._offboard_client.wait_for_service()
-        self._arming_client.wait_for_service()
+    def arm_and_offboard_all(self):
+        for d_id in self.drone_ids:
+            self.get_logger().info(f'🚀 Preparando {d_id}...')
+            self.arming_clients[d_id].wait_for_service()
+            self.offboard_clients[d_id].wait_for_service()
 
-        req = SetBool.Request()
-        req.data = True
-
-        self.get_logger().info('Activando modo Offboard...')
-        future_offboard = self._offboard_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future_offboard)
-        if future_offboard.result() is not None and future_offboard.result().success:
-            self.get_logger().info('✅ Offboard activado con éxito.')
-        else:
-            self.get_logger().warning('⚠️ Problema al activar Offboard.')
-
-        time.sleep(1) 
-
-        self.get_logger().info('Armando los motores...')
-        future_arming = self._arming_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future_arming)
-        if future_arming.result() is not None and future_arming.result().success:
-            self.get_logger().info('✅ Motores armados con éxito.')
-        else:
-            self.get_logger().warning('⚠️ Problema al armar los motores.')
+            req = SetBool.Request(data=True)
+            
+            future_off = self.offboard_clients[d_id].call_async(req)
+            rclpy.spin_until_future_complete(self, future_off)
+            
+            future_arm = self.arming_clients[d_id].call_async(req)
+            rclpy.spin_until_future_complete(self, future_arm)
+            
+            self.get_logger().info(f'✅ {d_id} armado y en Offboard.')
+            
+            # Darle a Gazebo 3 segundos de respiro entre despegues
+            time.sleep(3)
 
     def send_mission(self):
-        self.arm_and_offboard()
+        # 3. Llamada corregida a la función
+        self.arm_and_offboard_all()
 
         self.get_logger().info('Esperando 5 segundos de estabilización antes de iniciar las misiones...')
         time.sleep(5)
@@ -81,7 +86,7 @@ class MissionSequencer(Node):
             self.send_goal(task_data)
             time.sleep(2) 
 
-        self.get_logger().info('¡Todas las misiones enviadas con éxito! El dron ahora es completamente autónomo.')
+        self.get_logger().info('¡Todas las misiones enviadas con éxito! El enjambre ahora es completamente autónomo.')
 
     def send_goal(self, task_data):
         goal_msg = NewTask.Goal()
@@ -94,7 +99,6 @@ class MissionSequencer(Node):
             goal_msg.task.monitor.number = int(task_data['params']['number'])
             
         elif task_data['type'] in [ord('I'), ord('A')]:
-            from mission_planner.msg import Waypoint
             for wp in task_data['params']['waypoints']:
                 msg_wp = Waypoint()
                 msg_wp.x, msg_wp.y, msg_wp.z = float(wp['x']), float(wp['y']), float(wp['z'])
@@ -111,7 +115,7 @@ def main(args=None):
     rclpy.init(args=args)
     sequencer = MissionSequencer()
     
-    # Inicia la secuencia completa (Armar -> Offboard -> Misiones)
+    # Inicia la secuencia completa
     sequencer.send_mission()
     
     rclpy.spin_once(sequencer, timeout_sec=2.0)

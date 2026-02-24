@@ -137,7 +137,7 @@ install(DIRECTORY
   FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
 
-install(PROGRAMS scripts/mission_sequencer.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/swarm_initializer.py scripts/mission_sequencer.py DESTINATION lib/${PROJECT_NAME})
 
 # Install config files (si tienes)
 install(DIRECTORY

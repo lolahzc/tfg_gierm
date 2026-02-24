@@ -225,21 +225,31 @@ BT::NodeStatus BackToStation::tick(){
   }
 
   if (!agent_->task_queue_.empty()) {
-      RCLCPP_WARN(agent_->get_logger(), "⚠️ Tarea detectada. Abortando regreso a casa.");
       first_run = true;
       return BT::NodeStatus::FAILURE; 
   }
 
-  std::string nearest_station = "station_" + agent_->id_; 
+  // --- EL ARREGLO ESTÁ AQUÍ ---
+  // Mapeamos el ID del dron a los nombres exactos de tu conf.yaml
+  std::string nearest_station = "";
+  if (agent_->id_ == "drone0") nearest_station = "charging_station_drone0";
+  else if (agent_->id_ == "drone1") nearest_station = "charging_station_drone1";
+  else if (agent_->id_ == "drone2") nearest_station = "charging_station_drone2";
+  else nearest_station = "charging_station_4"; // Por defecto
+
   float target_x = 0.0;
   float target_y = 0.0;
   float target_z = 2.0;
 
-  if (agent_->known_positions_["stations"].find(nearest_station) != agent_->known_positions_["stations"].end()) {
-      auto station_pos = agent_->known_positions_["stations"][nearest_station];
+  // Buscar en las posiciones cargadas desde conf.yaml
+  if (agent_->known_positions_["charging_stations"].find(nearest_station) != agent_->known_positions_["charging_stations"].end()) {
+      auto station_pos = agent_->known_positions_["charging_stations"][nearest_station];
       target_x = station_pos.getX();
       target_y = station_pos.getY();
+      // Le damos un poco de altura de seguridad para el viaje
       target_z = station_pos.getZ() + 2.0; 
+  } else {
+      RCLCPP_WARN(agent_->get_logger(), "⚠️ Aún no encuentro %s. Usando 0,0 por emergencia.", nearest_station.c_str());
   }
 
   while(!isHaltRequested())
@@ -251,8 +261,9 @@ BT::NodeStatus BackToStation::tick(){
 
     switch(agent_->state_)
     {
+      case 1: // LANDED_DISARMED
       case 2: // LANDED_ARMED
-        // Comprobamos si estamos realmente cerca del origen 0,0 para darlo por finalizado
+        // Comprobamos si ya estamos en nuestra base
         if (std::abs(agent_->position_.getX() - target_x) < agent_->distance_error_ && 
             std::abs(agent_->position_.getY() - target_y) < agent_->distance_error_) {
             
@@ -271,18 +282,15 @@ BT::NodeStatus BackToStation::tick(){
         break;
 
       case 4: // FLYING_AUTO
-        RCLCPP_INFO(agent_->get_logger(), "✈️ Viajando a casa [%.2f, %.2f] a %.2fm de altura...", target_x, target_y, target_z);
+        RCLCPP_INFO(agent_->get_logger(), "✈️ Viajando a %s [%.2f, %.2f] a %.2fm...", nearest_station.c_str(), target_x, target_y, target_z);
         
-        // 1. Mandamos la orden de ir al punto exacto
         if(agent_->go_to_waypoint(target_x, target_y, target_z, false)) {
             
-            // 2. ESPERAMOS A QUE AEROSTACK2 CONFIRME LA LLEGADA
             while(!agent_->checkIfGoToServiceSucceeded(target_x, target_y, target_z)) {
                 if(isHaltRequested() || !agent_->task_queue_.empty()) return BT::NodeStatus::FAILURE;
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
             
-            // 3. Ya estamos parados en el aire exactamente sobre la base. Procedemos a aterrizar.
             RCLCPP_INFO(agent_->get_logger(), "⬇️ Posición alcanzada. ATERRIZANDO...");
             
             if(!agent_->land(false)) {
@@ -290,7 +298,7 @@ BT::NodeStatus BackToStation::tick(){
                 return BT::NodeStatus::FAILURE;
             }
             
-            // 4. Esperamos a que los sensores confirmen que ha tocado suelo (Estado 1 o 2)
+            // ESPERAMOS A QUE TOQUE EL SUELO (Estado 1 o 2)
             while(agent_->state_ != 1 && agent_->state_ != 2) {
                 if(isHaltRequested()) return BT::NodeStatus::IDLE;
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
