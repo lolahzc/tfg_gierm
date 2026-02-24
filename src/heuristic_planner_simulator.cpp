@@ -31,6 +31,7 @@ public:
 
 private:
     rclcpp_action::Server<HeuristicPlanning>::SharedPtr action_server_;
+    std::map<std::string, std::string> task_to_agent_map_;
 
     rclcpp_action::GoalResponse handle_goal(
         const rclcpp_action::GoalUUID & uuid,
@@ -100,90 +101,101 @@ private:
             RCLCPP_INFO(this->get_logger(), "📊 Planning for %zu agents and %zu tasks", 
                        agents.size(), tasks.size());
 
-            // CASO 1: No hay agentes disponibles
+            // 🛡️ ESCUDO 1: No hay agentes
             if (agents.empty()) {
                 RCLCPP_WARN(this->get_logger(), "❌ No agents available for planning");
                 return false;
             }
 
-            // CASO 2: No hay tareas pendientes - asignar tareas de espera
+            // 🛡️ ESCUDO 2: No hay tareas (Asignar Wait)
             if (tasks.empty()) {
-                RCLCPP_INFO(this->get_logger(), "📭 No tasks available, assigning wait tasks");
                 for (const auto& agent : agents) {
                     mission_planner::msg::TaskQueue queue;
                     queue.agent_id = agent;
-                    
                     mission_planner::msg::Task wait_task;
                     wait_task.id = "t_W";
                     wait_task.type = 'W';
                     queue.queue.push_back(wait_task);
-                    
                     result->planning_result.push_back(queue);
-                    RCLCPP_INFO(this->get_logger(), "⏳ Assigned WAIT task to agent: %s", agent.c_str());
                 }
                 return true;
             }
 
-            // CASO 3: Hay agentes y tareas - asignar estratégicamente
-            RCLCPP_INFO(this->get_logger(), "🎯 Assigning %zu tasks to %zu agents", tasks.size(), agents.size());
+            // --- REPARTO INTELIGENTE: MEMORIA + EQUILIBRIO + ALEATORIEDAD ---
+            std::map<std::string, mission_planner::msg::TaskQueue> agent_queues;
+            std::map<std::string, int> agent_task_count;
             
-            // Estrategia simple: asignar tareas round-robin a los agentes
-            size_t tasks_assigned = 0;
-            
-            for (size_t i = 0; i < agents.size() && tasks_assigned < tasks.size(); ++i) {
-                mission_planner::msg::TaskQueue queue;
-                queue.agent_id = agents[i];
-                
-                // Asignar al menos una tarea a cada agente
-                mission_planner::msg::Task task;
-                task.id = tasks[tasks_assigned];
-                task.type = determine_task_type(tasks[tasks_assigned]);
-                queue.queue.push_back(task);
-                
-                result->planning_result.push_back(queue);
-                RCLCPP_INFO(this->get_logger(), "✅ Assigned task '%s' to agent '%s'", 
-                           tasks[tasks_assigned].c_str(), agents[i].c_str());
-                
-                tasks_assigned++;
+            for (const auto& agent_id : agents) {
+                agent_queues[agent_id].agent_id = agent_id;
+                agent_task_count[agent_id] = 0; // Todos empiezan con 0 tareas
             }
 
-            // Si sobran tareas, asignarlas a los agentes de forma balanceada
-            while (tasks_assigned < tasks.size()) {
-                for (size_t i = 0; i < agents.size() && tasks_assigned < tasks.size(); ++i) {
-                    mission_planner::msg::Task additional_task;
-                    additional_task.id = tasks[tasks_assigned];
-                    additional_task.type = determine_task_type(tasks[tasks_assigned]);
-                    
-                    result->planning_result[i].queue.push_back(additional_task);
-                    RCLCPP_INFO(this->get_logger(), "➕ Additional task '%s' to agent '%s'", 
-                               tasks[tasks_assigned].c_str(), agents[i].c_str());
-                    
-                    tasks_assigned++;
+            // 1. Mirar en la memoria qué tareas ya repartimos en segundos anteriores
+            for (const auto& task_id : tasks) {
+                if (task_to_agent_map_.count(task_id) > 0) {
+                    std::string assigned_to = task_to_agent_map_[task_id];
+                    agent_task_count[assigned_to]++; // Le sumamos la tarea a su contador
                 }
             }
 
-            // Si sobran agentes, asignarles tarea de espera
-            for (size_t i = tasks.size(); i < agents.size(); ++i) {
-                mission_planner::msg::TaskQueue queue;
-                queue.agent_id = agents[i];
-                
-                mission_planner::msg::Task wait_task;
-                wait_task.id = "t_W";
-                wait_task.type = 'W';
-                queue.queue.push_back(wait_task);
-                
-                result->planning_result.push_back(queue);
-                RCLCPP_INFO(this->get_logger(), "⏳ Assigned WAIT task to extra agent: %s", agents[i].c_str());
+            // 2. Repartir tareas asegurando que nadie se quede mirando
+            for (const auto& task_id : tasks) {
+                // Si la tarea es nueva y no tiene dueño
+                if (task_to_agent_map_.count(task_id) == 0) {
+                    
+                    // a) Buscar quién tiene MENOS tareas en este momento
+                    int min_tasks = 999999;
+                    std::vector<std::string> min_agents;
+                    
+                    for (const auto& agent_id : agents) {
+                        if (agent_task_count[agent_id] < min_tasks) {
+                            min_tasks = agent_task_count[agent_id];
+                            min_agents.clear();
+                            min_agents.push_back(agent_id);
+                        } else if (agent_task_count[agent_id] == min_tasks) {
+                            min_agents.push_back(agent_id);
+                        }
+                    }
+
+                    // b) Si hay empate de vagos, SORTEO ALEATORIO entre ellos
+                    std::seed_seq seed(task_id.begin(), task_id.end());
+                    std::mt19937 gen(seed);
+                    std::uniform_int_distribution<> distrib(0, min_agents.size() - 1);
+                    
+                    std::string chosen_agent = min_agents[distrib(gen)];
+                    
+                    // c) Guardamos al ganador en la memoria y le sumamos carga de trabajo
+                    task_to_agent_map_[task_id] = chosen_agent;
+                    agent_task_count[chosen_agent]++;
+                    
+                    RCLCPP_INFO(this->get_logger(), "🎲 NUEVA tarea '%s' asignada a '%s'", 
+                                task_id.c_str(), chosen_agent.c_str());
+                }
+
+                // 3. Meter la tarea (antigua o recién sorteada) en la cola del dron
+                std::string current_agent = task_to_agent_map_[task_id];
+                mission_planner::msg::Task t;
+                t.id = task_id;
+                t.type = determine_task_type(task_id);
+                agent_queues[current_agent].queue.push_back(t);
+            }
+
+            // 4. Empaquetar el resultado final
+            for (const auto& agent_id : agents) {
+                if (agent_queues[agent_id].queue.empty()) {
+                    mission_planner::msg::Task wait_task;
+                    wait_task.id = "t_W";
+                    wait_task.type = 'W';
+                    agent_queues[agent_id].queue.push_back(wait_task);
+                }
+                result->planning_result.push_back(agent_queues[agent_id]);
             }
 
             result->success = true;
-            RCLCPP_INFO(this->get_logger(), "🎉 Generated plan with %zu agent queues", 
-                       result->planning_result.size());
-            
             return true;
 
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "💥 Exception in heuristic planning: %s", e.what());
+            RCLCPP_ERROR(this->get_logger(), "💥 Exception: %s", e.what());
             return false;
         }
     }

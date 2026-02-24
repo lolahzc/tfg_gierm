@@ -298,8 +298,8 @@ BT::NodeStatus BackToStation::tick(){
                 return BT::NodeStatus::FAILURE;
             }
             
-            // ESPERAMOS A QUE TOQUE EL SUELO (Estado 1 o 2)
-            while(agent_->state_ != 1 && agent_->state_ != 2) {
+            // EL ARREGLO ESTÁ AQUÍ: Añadimos el estado 0 (Apagado/Desarmado)
+            while(agent_->state_ != 0 && agent_->state_ != 1 && agent_->state_ != 2) {
                 if(isHaltRequested()) return BT::NodeStatus::IDLE;
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }

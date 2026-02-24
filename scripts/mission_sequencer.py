@@ -77,7 +77,7 @@ class MissionSequencer(Node):
             {
                 'id': 'tarea_entrega_1',
                 'type': ord('D'), # Deliver Tool
-                'params': {'tool_id': 'tool_1', 'human_target_id': 'human_target_1'}
+                'params': {'tool_id': 'hammer', 'human_target_id': 'human_target_1'}
             }
         ]
 
