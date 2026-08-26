@@ -19,6 +19,8 @@ The architecture has two layers:
 The low-level controllers are not part of this work; simple stand-ins are
 included so the software layer can be exercised in simulation.
 
+<video src="./assets/SimulacionCompleta.webm" width="100%" controls></video>
+
 ## Repository layout
 
 | Directory | Contents |
