@@ -1,8 +1,10 @@
+#include <cstdio>
 #include "mission_planner/agent_behaviour_manager.hpp"
 #include "as2_msgs/msg/yaw_mode.hpp"
 
 #include <chrono>
 #include <thread>
+#include <functional>
 
 // Behavior Tree structure xml definition
 static const char* behaviour_tree_xml = R"(
@@ -11,6 +13,88 @@ static const char* behaviour_tree_xml = R"(
     </BehaviorTree>
 </root>
  )";
+
+// Every "wait until we reach this waypoint" loop below used to poll
+// checkIfGoToServiceSucceeded() with no time limit. If the platform never
+// converges within goto_error_ (PID overshoot/oscillation, a stuck
+// controller, etc.), that loop - and with it the single BT tick calling it -
+// never returns. Since executeBehaviorTree() only logs/checks mission state
+// between ticks, the agent then goes silent forever: no further log lines,
+// no way to notice or recover. waitForArrival() bounds that wait so a stuck
+// movement fails loudly instead of hanging the whole agent indefinitely.
+enum class ArrivalWaitResult { REACHED, HALTED, TIMED_OUT };
+
+static ArrivalWaitResult waitForArrival(
+    AgentNode* agent, float x, float y, float z,
+    const std::function<bool()>& halt_requested,
+    std::chrono::milliseconds poll_period = std::chrono::milliseconds(100),
+    double timeout_s = 30.0)
+{
+  auto start = std::chrono::steady_clock::now();
+  while (!agent->checkIfGoToServiceSucceeded(x, y, z)) {
+    if (halt_requested()) return ArrivalWaitResult::HALTED;
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() > timeout_s) {
+      return ArrivalWaitResult::TIMED_OUT;
+    }
+    std::this_thread::sleep_for(poll_period);
+  }
+  return ArrivalWaitResult::REACHED;
+}
+
+// Same problem, different symptom: several leaves wait for agent_->state_ to
+// reach a target platform state (e.g. FLYING after take_off(), or
+// DISARMED/LANDED after land()) with an unbounded while loop. If the
+// platform never reports that transition, the agent hangs identically to
+// the position-wait case above - this is what left a drone stuck in
+// LANDING forever after a successful land() call that never got confirmed.
+static ArrivalWaitResult waitForState(
+    const std::function<bool()>& state_reached,
+    const std::function<bool()>& halt_requested,
+    std::chrono::milliseconds poll_period = std::chrono::milliseconds(100),
+    double timeout_s = 60.0)
+{
+  auto start = std::chrono::steady_clock::now();
+  while (!state_reached()) {
+    if (halt_requested()) return ArrivalWaitResult::HALTED;
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() > timeout_s) {
+      return ArrivalWaitResult::TIMED_OUT;
+    }
+    std::this_thread::sleep_for(poll_period);
+  }
+  return ArrivalWaitResult::REACHED;
+}
+
+// Recharge::tick() and BackToStation::tick() run their own state machine in a
+// `while(!isHaltRequested())` loop whose `default:` branch (any platform
+// state other than the few it explicitly handles) just sleeps and retries
+// with no bound. That default case is reachable even after the per-step
+// waitForState()/waitForArrival() calls above return HALTED: BT.CPP's own
+// scheduler can halt() and later re-tick one of these nodes while the
+// platform is still sitting in a leftover state (e.g. LANDING) from an
+// action the previous invocation abandoned mid-flight. Without an overall
+// deadline on the loop itself, that leftover state spins the `default:`
+// branch forever - this is what left a drone parked in LANDING permanently
+// even after the individual state-wait timeouts were added.
+constexpr double kOverallTickDeadlineSeconds = 180.0;
+
+// A drone counts as physically on the ground only when its altitude is within
+// this margin of the ground level where it is parked. take_off_height_
+// defaults to 10 m, so 1.5 m cleanly separates "landed" from "hovering"
+// without being so tight that pose noise or uneven terrain trips it.
+constexpr float kOnGroundAltitudeMargin = 1.5f;
+
+// Parametros para decidir cuando un dron debe dejar la tarea y volver a base.
+// kBatteryDrainPerSecond debe coincidir con battery_faker (battery_decrease
+// por tick de 500 ms => x2 por segundo).
+constexpr float kCruiseSpeedMps = 1.2f;          // velocidad de crucero observada
+constexpr float kBatteryDrainPerSecond = 0.008f; // 0.004 por tick a 2 Hz
+constexpr float kMinBatteryReserve = 0.22f;      // colchon para aterrizar
+
+// Monotonic seconds, used to age-check incoming telemetry.
+static double nowSeconds() {
+  return std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // Behavior Tree Nodes implementation ***********************************************************************************
 
@@ -66,11 +150,15 @@ BT::NodeStatus GoNearChargingStation::tick(){
   {
     switch(agent_->state_)
     {
+      case 0: // UNINITIALIZED - also what the platform reports right after a
+              // completed land()+disarm, not just before the first arm
+      case 1: // LANDED_DISARMED
       case 2: // LANDED_ARMED
         if(isHaltRequested())
           return BT::NodeStatus::IDLE;
         RCLCPP_INFO(agent_->get_logger(), "[GoNearChargingStation] Calling take_off");
         // Aerostack2 take_off action call
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false))
         {
           if(isHaltRequested())
@@ -81,11 +169,17 @@ BT::NodeStatus GoNearChargingStation::tick(){
         // take_off action result waiting loop
         else
         {
-          while(agent_->state_ != 4)
+          switch (waitForState(
+              [this]() { return agent_->state_ == 4; },
+              [this]() { return isHaltRequested(); }))
           {
-            if(isHaltRequested())
+            case ArrivalWaitResult::HALTED:
               return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED:
+              break;
           }
         }
         break;
@@ -99,12 +193,15 @@ BT::NodeStatus GoNearChargingStation::tick(){
         if(agent_->go_to_waypoint(assigned_charging_station.getX(), assigned_charging_station.getY(),
               assigned_charging_station.getZ() + 1, false))
         {
-          while(!agent_->checkIfGoToServiceSucceeded(assigned_charging_station.getX(),
-                assigned_charging_station.getY(), assigned_charging_station.getZ() + 1))
+          switch (waitForArrival(agent_, assigned_charging_station.getX(), assigned_charging_station.getY(),
+                assigned_charging_station.getZ() + 1, [this]{ return isHaltRequested(); },
+                std::chrono::milliseconds(1)))
           {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(agent_->get_logger(), "[GoNearChargingStation] Timeout waiting to reach charging station");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED: break;
           }
           RCLCPP_INFO(agent_->get_logger(), "[GoNearChargingStation] Returning SUCCESS...");
           return BT::NodeStatus::SUCCESS;
@@ -117,12 +214,11 @@ BT::NodeStatus GoNearChargingStation::tick(){
           return BT::NodeStatus::FAILURE;
         }
         break;
-      case 0: // UNINITIALIZED
-      case 1: // LANDED_DISARMED
       case 3: // TAKING_OFF
       case 5: // FLYING_MANUAL
       case 6: // LANDING
       default:
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         break;
     }
   }
@@ -166,15 +262,40 @@ BT::NodeStatus Recharge::tick(){
     goal.task.type = task->getType();
   }
 
-  RCLCPP_INFO(agent_->get_logger(), "[Recharge] Recharging...");
-  
+  if(!announced_) {
+    RCLCPP_INFO(agent_->get_logger(), "[recarga] Iniciando recarga (objetivo %.0f%%).",
+      final_percentage * 100.0f);
+    announced_ = true;
+  }
+
+  auto tick_start = std::chrono::steady_clock::now();
   while(!isHaltRequested())
   {
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - tick_start).count() >
+        kOverallTickDeadlineSeconds) {
+      RCLCPP_ERROR(agent_->get_logger(),
+        "[recarga] Timeout global (%.0f s) sin completar la recarga. Estado=%s(%d), bateria=%.0f%%.",
+        kOverallTickDeadlineSeconds, AgentNode::stateName(agent_->state_), agent_->state_,
+        agent_->battery_ * 100.0f);
+      announced_ = false;
+      return BT::NodeStatus::FAILURE;
+    }
+
+    // Same reasoning as BackToStation: state_ defaults to 0 (DESARMADO), so
+    // without fresh telemetry this loop would treat a flying drone as parked
+    // and "recharge" it in mid-air.
+    if (!agent_->platformInfoFresh()) {
+      RCLCPP_WARN_THROTTLE(agent_->get_logger(), *agent_->get_clock(), 5000,
+        "[recarga] Sin telemetria fresca de la plataforma; esperando datos antes de actuar.");
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      continue;
+    }
+
     switch(agent_->state_)
     {
-      case 1: // LANDED_DISARMED
-      case 2: // LANDED_ARMED
-        // Si alcanzamos la batería deseada
+      case 0: // DESARMADO - also reported right after a completed land()
+      case 1: // EN_SUELO_DESARMADO
+      case 2: // EN_SUELO_ARMADO
         if(agent_->battery_ >= final_percentage)
         {
           if(recharge_task && agent_->task_result_ac_)
@@ -182,18 +303,48 @@ BT::NodeStatus Recharge::tick(){
             goal.result = 1;
             agent_->task_result_ac_->async_send_goal(goal);
             agent_->removeTaskFromQueue(goal.task.id, 'R');
-            RCLCPP_INFO(agent_->get_logger(), "📨 Resultado 'SUCCESS' de Recarga disparado.");
+            RCLCPP_INFO(agent_->get_logger(),
+              "[recarga] Completada (bateria %.0f%%). Resultado enviado al planificador.",
+              agent_->battery_ * 100.0f);
+          } else {
+            RCLCPP_INFO(agent_->get_logger(),
+              "[recarga] Completada (bateria %.0f%%).", agent_->battery_ * 100.0f);
           }
+          announced_ = false;
           return BT::NodeStatus::SUCCESS;
         }
+        RCLCPP_INFO_THROTTLE(agent_->get_logger(), *agent_->get_clock(), 10000,
+          "[recarga] En curso: bateria %.0f%% de %.0f%% objetivo.",
+          agent_->battery_ * 100.0f, final_percentage * 100.0f);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         break;
-      case 4: // FLYING_AUTO
+      case 4: // VOLANDO - hay que bajar antes de poder recargar
+        RCLCPP_INFO(agent_->get_logger(), "[recarga] En vuelo; aterrizando para recargar.");
+        agent_->cancelGoTo();
         if(!agent_->land(false)) return BT::NodeStatus::FAILURE;
-        while(agent_->state_ != 1 && agent_->state_ != 2)
+        agent_->landing_in_progress_ = true;
+        // isConfirmedLanded() instead of a bare state check - see the note in
+        // BackToStation. Recharging only makes sense once we are really down.
+        switch (waitForState(
+            [this]() { return agent_->isConfirmedLanded(); },
+            [this]() { return isHaltRequested(); }))
         {
-          if(isHaltRequested()) return BT::NodeStatus::IDLE;
-          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          case ArrivalWaitResult::HALTED:
+            agent_->landing_in_progress_ = false;
+            return BT::NodeStatus::IDLE;
+          case ArrivalWaitResult::TIMED_OUT:
+            agent_->landing_in_progress_ = false;
+            RCLCPP_ERROR(agent_->get_logger(),
+              "[recarga] Aterrizaje NO confirmado tras 60 s: estado=%s(%d), z=%.2f m, telemetria=%s.",
+              AgentNode::stateName(agent_->state_), agent_->state_,
+              agent_->poseFresh() ? agent_->position_.getZ() : -1.0f,
+              agent_->platformInfoFresh() ? "fresca" : "AUSENTE");
+            return BT::NodeStatus::FAILURE;
+          case ArrivalWaitResult::REACHED:
+            agent_->landing_in_progress_ = false;
+            RCLCPP_INFO(agent_->get_logger(),
+              "[recarga] Aterrizaje CONFIRMADO (z=%.2f m).", agent_->position_.getZ());
+            break;
         }
         break;
       default:
@@ -201,7 +352,7 @@ BT::NodeStatus Recharge::tick(){
         break;
     }
   }
-  
+
   // Salida limpia por Halt sin enviar mensajes erróneos
   return BT::NodeStatus::IDLE;
 }
@@ -218,86 +369,187 @@ void BackToStation::init(AgentNode* agent){agent_ = agent;}
 BT::PortsList BackToStation::providedPorts() {return{};}
 
 BT::NodeStatus BackToStation::tick(){
-  static bool first_run = true;
-  if(first_run) {
-      RCLCPP_WARN(agent_->get_logger(), "🏠 INICIANDO SECUENCIA DE RETORNO (BackToStation)...");
-      first_run = false;
-  }
-
+  // A new task means we are no longer returning to base; reset the latches so
+  // the next genuine return announces itself once more.
   if (!agent_->task_queue_.empty()) {
-      RCLCPP_WARN(agent_->get_logger(), "⚠️ Tarea detectada. Abortando regreso a casa.");
-      first_run = true;
-      return BT::NodeStatus::FAILURE; 
+      announced_ = false;
+      idle_logged_ = false;
+      return BT::NodeStatus::FAILURE;
   }
 
-  std::string nearest_station = "station_" + agent_->id_; 
+  if(!announced_) {
+      RCLCPP_INFO(agent_->get_logger(), "[volver-a-base] Iniciando secuencia de retorno.");
+      announced_ = true;
+  }
+
+  // --- EL ARREGLO ESTÁ AQUÍ ---
+  // Mapeamos el ID del dron a los nombres exactos de tu conf.yaml
+  std::string nearest_station = "";
+  if (agent_->id_ == "drone0") nearest_station = "charging_station_drone0";
+  else if (agent_->id_ == "drone1") nearest_station = "charging_station_drone1";
+  else if (agent_->id_ == "drone2") nearest_station = "charging_station_drone2";
+  else nearest_station = "charging_station_4"; // Por defecto
+
   float target_x = 0.0;
   float target_y = 0.0;
   float target_z = 2.0;
+  // Ground level at the station, used to tell "landed here" from "hovering
+  // over here". target_z is deliberately 2 m above it (approach altitude).
+  float ground_z = 0.0;
 
-  if (agent_->known_positions_["stations"].find(nearest_station) != agent_->known_positions_["stations"].end()) {
-      auto station_pos = agent_->known_positions_["stations"][nearest_station];
+  // Buscar en las posiciones cargadas desde conf.yaml
+  if (agent_->known_positions_["charging_stations"].find(nearest_station) != agent_->known_positions_["charging_stations"].end()) {
+      auto station_pos = agent_->known_positions_["charging_stations"][nearest_station];
       target_x = station_pos.getX();
       target_y = station_pos.getY();
+      ground_z = station_pos.getZ();
+      // Le damos un poco de altura de seguridad para el viaje
       target_z = station_pos.getZ() + 2.0; 
+  } else {
+      RCLCPP_WARN(agent_->get_logger(), "⚠️ Aún no encuentro %s. Usando 0,0 por emergencia.", nearest_station.c_str());
   }
 
+  auto tick_start = std::chrono::steady_clock::now();
   while(!isHaltRequested())
   {
     if (!agent_->task_queue_.empty()) {
-        first_run = true;
-        return BT::NodeStatus::FAILURE; 
+        announced_ = false;
+        idle_logged_ = false;
+        return BT::NodeStatus::FAILURE;
+    }
+
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - tick_start).count() >
+        kOverallTickDeadlineSeconds) {
+      RCLCPP_ERROR(agent_->get_logger(),
+        "[volver-a-base] Timeout global (%.0f s) sin completar el retorno. Estado=%s(%d), z=%.2f m.",
+        kOverallTickDeadlineSeconds, AgentNode::stateName(agent_->state_), agent_->state_,
+        agent_->poseFresh() ? agent_->position_.getZ() : -1.0f);
+      announced_ = false;
+      idle_logged_ = false;
+      return BT::NodeStatus::FAILURE;
+    }
+
+    // Never act on a state we cannot currently verify. state_ starts at 0
+    // (DESARMADO), so without this guard a node that has not yet received any
+    // PlatformInfo would read "on the ground" and start commanding a takeoff.
+    if (!agent_->platformInfoFresh()) {
+      RCLCPP_WARN_THROTTLE(agent_->get_logger(), *agent_->get_clock(), 5000,
+        "[volver-a-base] Sin telemetria fresca de la plataforma; esperando datos antes de actuar.");
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      continue;
     }
 
     switch(agent_->state_)
     {
+      case 0: // Also reported as "disarmed" right after a completed land(), not just pre-arm
+      case 1: // LANDED_DISARMED
       case 2: // LANDED_ARMED
-        // Comprobamos si estamos realmente cerca del origen 0,0 para darlo por finalizado
-        if (std::abs(agent_->position_.getX() - target_x) < agent_->distance_error_ && 
-            std::abs(agent_->position_.getY() - target_y) < agent_->distance_error_) {
-            
-            RCLCPP_INFO(agent_->get_logger(), "✅ YA ESTAMOS EN CASA Y EN EL SUELO. FIN.");
-            first_run = true;
+        // Comprobamos si ya estamos en nuestra base
+        // "Home" requires all three of: the right X/Y, telemetry that
+        // positively confirms we are on the ground, and a fresh pose. The old
+        // check tested X/Y only yet still printed "Y EN EL SUELO", so a drone
+        // hovering at take_off_height_ directly above its own charging station
+        // was declared landed-at-home and the tree stopped trying to bring it
+        // down. That is the "takes off and never comes back" symptom.
+        if (std::abs(agent_->position_.getX() - target_x) < agent_->distance_error_ &&
+            std::abs(agent_->position_.getY() - target_y) < agent_->distance_error_ &&
+            agent_->isConfirmedLanded(ground_z)) {
+
+            if (!idle_logged_) {
+              RCLCPP_INFO(agent_->get_logger(),
+                "[volver-a-base] En base y en el suelo confirmado (z=%.2f m, estado=%s). Fin.",
+                agent_->position_.getZ(), AgentNode::stateName(agent_->state_));
+              idle_logged_ = true;
+            }
+            // ReactiveSequence(Idle, BackToStation) restarts BackToStation
+            // fresh from this exact branch on every root tick while idle -
+            // each restart spawns a new AsyncActionNode thread just to
+            // immediately report "still home". Measured in testing: ~5
+            // restarts/sec per idle drone, enough concurrent thread churn
+            // across 3 drones to visibly slow down AS2/Gazebo message
+            // processing elsewhere (a drone's landing confirmation took
+            // 119s instead of ~10s in one run). There's no reason an
+            // already-parked drone needs to re-confirm that faster than 2Hz.
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             return BT::NodeStatus::SUCCESS;
         } else {
             RCLCPP_INFO(agent_->get_logger(), "🚀 Despegando para volver a casa...");
+            agent_->arm();
             if(!agent_->take_off(agent_->take_off_height_, false)) return BT::NodeStatus::FAILURE;
-            
-            while(agent_->state_ != 4) {
-                if(isHaltRequested()) return BT::NodeStatus::IDLE;
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            switch (waitForState(
+                [this]() { return agent_->state_ == 4; },
+                [this]() { return isHaltRequested(); }))
+            {
+              case ArrivalWaitResult::HALTED:
+                return BT::NodeStatus::IDLE;
+              case ArrivalWaitResult::TIMED_OUT:
+                RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar hacia casa.");
+                return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::REACHED:
+                break;
             }
         }
         break;
 
       case 4: // FLYING_AUTO
-        RCLCPP_INFO(agent_->get_logger(), "✈️ Viajando a casa [%.2f, %.2f] a %.2fm de altura...", target_x, target_y, target_z);
+        RCLCPP_INFO(agent_->get_logger(), "✈️ Viajando a %s [%.2f, %.2f] a %.2fm...", nearest_station.c_str(), target_x, target_y, target_z);
         
-        // 1. Mandamos la orden de ir al punto exacto
         if(agent_->go_to_waypoint(target_x, target_y, target_z, false)) {
             
-            // 2. ESPERAMOS A QUE AEROSTACK2 CONFIRME LA LLEGADA
-            while(!agent_->checkIfGoToServiceSucceeded(target_x, target_y, target_z)) {
-                if(isHaltRequested() || !agent_->task_queue_.empty()) return BT::NodeStatus::FAILURE;
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            switch (waitForArrival(agent_, target_x, target_y, target_z,
+                  [this]{ return isHaltRequested() || !agent_->task_queue_.empty(); },
+                  std::chrono::milliseconds(200)))
+            {
+              case ArrivalWaitResult::HALTED: return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::TIMED_OUT:
+                RCLCPP_ERROR(agent_->get_logger(), "[BackToStation] Timeout waiting to reach %s", nearest_station.c_str());
+                return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::REACHED: break;
             }
             
-            // 3. Ya estamos parados en el aire exactamente sobre la base. Procedemos a aterrizar.
-            RCLCPP_INFO(agent_->get_logger(), "⬇️ Posición alcanzada. ATERRIZANDO...");
-            
+            RCLCPP_INFO(agent_->get_logger(), "[volver-a-base] Posicion alcanzada. Aterrizando.");
+
+            // Stop the GoTo before landing, otherwise both behaviors stay
+            // active and fight over the platform's control mode.
+            agent_->cancelGoTo();
+
             if(!agent_->land(false)) {
                 RCLCPP_ERROR(agent_->get_logger(), "❌ Fallo al intentar aterrizar.");
                 return BT::NodeStatus::FAILURE;
             }
-            
-            // 4. Esperamos a que los sensores confirmen que ha tocado suelo (Estado 1 o 2)
-            while(agent_->state_ != 1 && agent_->state_ != 2) {
-                if(isHaltRequested()) return BT::NodeStatus::IDLE;
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            // Success now requires isConfirmedLanded(): fresh telemetry, a
+            // genuinely landed platform state AND a ground-level altitude.
+            // The previous predicate accepted state_==0, which is also the
+            // value used when no telemetry had arrived - so it returned
+            // REACHED on its first evaluation, before ever sleeping, and
+            // logged a completed landing for a drone still in the air.
+            agent_->landing_in_progress_ = true;
+            switch (waitForState(
+                [this, ground_z]() { return agent_->isConfirmedLanded(ground_z); },
+                [this]() { return isHaltRequested(); }))
+            {
+              case ArrivalWaitResult::HALTED:
+                agent_->landing_in_progress_ = false;
+                return BT::NodeStatus::IDLE;
+              case ArrivalWaitResult::TIMED_OUT:
+                agent_->landing_in_progress_ = false;
+                RCLCPP_ERROR(agent_->get_logger(),
+                  "[volver-a-base] Aterrizaje NO confirmado tras 60 s: estado=%s(%d), z=%.2f m, telemetria=%s. El dron puede seguir en el aire.",
+                  AgentNode::stateName(agent_->state_), agent_->state_,
+                  agent_->poseFresh() ? agent_->position_.getZ() : -1.0f,
+                  agent_->platformInfoFresh() ? "fresca" : "AUSENTE");
+                return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::REACHED:
+                agent_->landing_in_progress_ = false;
+                break;
             }
-            
-            RCLCPP_INFO(agent_->get_logger(), "🛬 Aterrizaje completado con éxito.");
-            first_run = true;
+
+            RCLCPP_INFO(agent_->get_logger(),
+              "[volver-a-base] Aterrizaje CONFIRMADO (z=%.2f m, estado=%s).",
+              agent_->position_.getZ(), AgentNode::stateName(agent_->state_));
+            idle_logged_ = true;
             return BT::NodeStatus::SUCCESS;
         }
         return BT::NodeStatus::FAILURE;
@@ -335,20 +587,38 @@ BT::NodeStatus GoNearHumanTarget::tick(){
   {
     switch(agent_->state_)
     {
-      case 2:
+      case 0: // UNINITIALIZED - also what the platform reports right after a
+              // completed land()+disarm, not just before the first arm
+      case 1: // LANDED_DISARMED
+      case 2: // LANDED_ARMED
         if(isHaltRequested()) return BT::NodeStatus::IDLE;
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false)) return BT::NodeStatus::FAILURE;
-        while(agent_->state_ != 4) {
-            if(isHaltRequested()) return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        switch (waitForState(
+            [this]() { return agent_->state_ == 4; },
+            [this]() { return isHaltRequested(); }))
+        {
+          case ArrivalWaitResult::HALTED:
+            return BT::NodeStatus::IDLE;
+          case ArrivalWaitResult::TIMED_OUT:
+            RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+            return BT::NodeStatus::FAILURE;
+          case ArrivalWaitResult::REACHED:
+            break;
         }
         break;
       case 4:
         if(isHaltRequested()) return BT::NodeStatus::IDLE;
         if(agent_->go_to_waypoint(near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ(), false)) {
-            while(!agent_->checkIfGoToServiceSucceeded(near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ())) {
-                if(isHaltRequested()) return BT::NodeStatus::IDLE;
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            switch (waitForArrival(agent_, near_human_pose.getX(), near_human_pose.getY(), near_human_pose.getZ(),
+                  [this]{ return isHaltRequested(); }, std::chrono::milliseconds(100)))
+            {
+              case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+              case ArrivalWaitResult::TIMED_OUT:
+                RCLCPP_ERROR(rclcpp::get_logger("go_near_human_target"),
+                  "[GoNearHumanTarget] Timeout waiting to reach human target");
+                return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::REACHED: break;
             }
             return BT::NodeStatus::SUCCESS;
         }
@@ -458,9 +728,13 @@ BT::NodeStatus GoNearUGV::tick(){
   {
     switch(agent_->state_)
     {
+      case 0: //UNINITIALIZED - also what the platform reports right after a
+              // completed land()+disarm, not just before the first arm
+      case 1: //LANDED_DISARMED
       case 2: //LANDED_ARMED
         if(isHaltRequested())
           return BT::NodeStatus::IDLE;
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false))
         {
           if(isHaltRequested())
@@ -470,11 +744,17 @@ BT::NodeStatus GoNearUGV::tick(){
         }
         else
         {
-          while(agent_->state_ != 4)
+          switch (waitForState(
+              [this]() { return agent_->state_ == 4; },
+              [this]() { return isHaltRequested(); }))
           {
-            if(isHaltRequested())
+            case ArrivalWaitResult::HALTED:
               return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED:
+              break;
           }
         }
         break;
@@ -484,11 +764,14 @@ BT::NodeStatus GoNearUGV::tick(){
         RCLCPP_INFO(rclcpp::get_logger("go_near_ugv"), "[GoNearUGV] Moving near UGV...");
         if(agent_->go_to_waypoint(near_waypoint.getX(), near_waypoint.getY(), near_waypoint.getZ(), false))
         {
-          while(!agent_->checkIfGoToServiceSucceeded(near_waypoint.getX(), near_waypoint.getY(), near_waypoint.getZ()))
+          switch (waitForArrival(agent_, near_waypoint.getX(), near_waypoint.getY(), near_waypoint.getZ(),
+                [this]{ return isHaltRequested(); }, std::chrono::milliseconds(1)))
           {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(rclcpp::get_logger("go_near_ugv"), "[GoNearUGV] Timeout waiting to reach UGV");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED: break;
           }
           if (classes::distance2D(near_waypoint, agent_->position_) < agent_->distance_error_)
           {
@@ -504,12 +787,11 @@ BT::NodeStatus GoNearUGV::tick(){
           return BT::NodeStatus::FAILURE;
         }
         break;
-      case 0: //UNINITIALIZED
-      case 1: //LANDED_DISARMED
       case 3: //TAKING_OFF
       case 5: //FLIYING_MANUAL
       case 6: //LANDING
       default:
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         break;
     }
   }
@@ -637,9 +919,13 @@ BT::NodeStatus GoNearWP::tick(){
   {
     switch(agent_->state_)
     {
+      case 0: //UNINITIALIZED - also what the platform reports right after a
+              // completed land()+disarm, not just before the first arm
+      case 1: //LANDED_DISARMED
       case 2: //LANDED_ARMED
         if(isHaltRequested())
           return BT::NodeStatus::IDLE;
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false))
         {
           if(isHaltRequested())
@@ -649,11 +935,17 @@ BT::NodeStatus GoNearWP::tick(){
         }
         else
         {
-          while(agent_->state_ != 4)
+          switch (waitForState(
+              [this]() { return agent_->state_ == 4; },
+              [this]() { return isHaltRequested(); }))
           {
-            if(isHaltRequested())
+            case ArrivalWaitResult::HALTED:
               return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED:
+              break;
           }
         }
         break;
@@ -663,12 +955,14 @@ BT::NodeStatus GoNearWP::tick(){
         RCLCPP_INFO(rclcpp::get_logger("go_near_wp"), "[GoNearWP] Moving near WP...");
         if(agent_->go_to_waypoint(near_waypoint.getX(), near_waypoint.getY(), near_waypoint.getZ(), false))
         {
-          while(!agent_->checkIfGoToServiceSucceeded(near_waypoint.getX(), near_waypoint.getY(),
-                near_waypoint.getZ()))
+          switch (waitForArrival(agent_, near_waypoint.getX(), near_waypoint.getY(), near_waypoint.getZ(),
+                [this]{ return isHaltRequested(); }, std::chrono::milliseconds(1)))
           {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(rclcpp::get_logger("go_near_wp"), "[GoNearWP] Timeout waiting to reach waypoint");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED: break;
           }
           RCLCPP_INFO(rclcpp::get_logger("go_near_wp"), "[GoNearWP] Returning SUCCESS...");
           return BT::NodeStatus::SUCCESS;
@@ -681,15 +975,16 @@ BT::NodeStatus GoNearWP::tick(){
           return BT::NodeStatus::FAILURE;
         }
         break;
-      case 0: //UNINITIALIZED
-      case 1: //LANDED_DISARMED
       case 3: //TAKING_OFF
       case 5: //FLIYING_MANUAL
       case 6: //LANDING
       default:
+        // These are transient states we're just passing through (or an
+        // unrecognized one) - sleep so this doesn't busy-spin at 100% CPU
+        // checking isHaltRequested() as fast as the CPU allows.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         break;
     }
-    //MAYBE PUT SOME SLEEP TIME HERE ********************************************************************************
   }
   return BT::NodeStatus::IDLE;
 }
@@ -761,9 +1056,13 @@ BT::NodeStatus InspectPVArray::tick(){
   }
   
   classes::Task* task = agent_->task_queue_.front();
+  // id y tipo copiados POR VALOR: emptyTheQueue() (que dispara
+  // isBatteryEnough desde el hilo del executor) borra las tareas, dejando
+  // este puntero colgando mientras el nodo sigue esperando en waitForArrival.
   std::string task_id = task->getID();
+  const char task_type = task->getType();
 
-  if(task->getType() != 'I' && task->getType() != 'A') {
+  if(task_type != 'I' && task_type != 'A') {
     if(isHaltRequested()) return BT::NodeStatus::IDLE;
     return BT::NodeStatus::FAILURE;
   }
@@ -774,7 +1073,7 @@ BT::NodeStatus InspectPVArray::tick(){
   auto sendResult = [&](int result_value) {
     if (agent_->task_result_ac_) {
       goal.task.id = task_id;
-      goal.task.type = task->getType();
+      goal.task.type = task_type;
       goal.result = result_value;
       
       if (result_value == 1) { 
@@ -792,7 +1091,14 @@ BT::NodeStatus InspectPVArray::tick(){
     } else {
       RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "❌ ERROR: task_result_ac_ no está inicializado.");
     }
-    if(result_value == 1) agent_->removeTaskFromQueue(task_id, task->getType());
+    // Se quita de la cola tanto si sale bien como si falla. Antes solo se
+    // borraba en caso de exito, asi que una tarea fallida se quedaba en la
+    // cola del agente para siempre: el arbol volvia a tickear este mismo nodo,
+    // reintentaba, volvia a agotar los 30 s de waitForArrival... y el dron se
+    // quedaba dando vueltas indefinidamente en el punto lejano sin volver a
+    // casa. El planner, por su parte, SI borra la tarea al recibir result=0 y
+    // la reasigna, con lo que los dos quedaban ademas descoordinados.
+    agent_->removeTaskFromQueue(task_id, task_type);
   };
 
   if (wp.size() < 2) {
@@ -801,37 +1107,68 @@ BT::NodeStatus InspectPVArray::tick(){
       return BT::NodeStatus::FAILURE;
   }
 
-  RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "🚀 [InspectPVArray] Iniciando misión de inspección...");
+  RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"),
+    "[inspeccion] Iniciando %s (tipo %c, %zu waypoints).", task_id.c_str(), task_type, wp.size());
 
+  auto tick_start = std::chrono::steady_clock::now();
   while(!isHaltRequested())
   {
+    // Red de seguridad: sin esto el nodo podia reintentar sin fin.
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - tick_start).count() >
+        kOverallTickDeadlineSeconds) {
+      RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"),
+        "[inspeccion] %s abandonada tras %.0f s sin completarse (estado=%s). Se informa al planificador para que la reasigne.",
+        task_id.c_str(), kOverallTickDeadlineSeconds, AgentNode::stateName(agent_->state_));
+      sendResult(0);
+      return BT::NodeStatus::FAILURE;
+    }
+
     if (agent_->state_ != 4) {
         RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "🚁 Solicitando despegue a Aerostack2...");
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false)) {
             sendResult(0);
             return BT::NodeStatus::FAILURE;
         }
-        while(agent_->state_ != 4) {
-            if(isHaltRequested()) return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        switch (waitForState(
+            [this]() { return agent_->state_ == 4; },
+            [this]() { return isHaltRequested(); }))
+        {
+          case ArrivalWaitResult::HALTED:
+            return BT::NodeStatus::IDLE;
+          case ArrivalWaitResult::TIMED_OUT:
+            RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+            return BT::NodeStatus::FAILURE;
+          case ArrivalWaitResult::REACHED:
+            break;
         }
     }
 
     if (agent_->state_ == 4) {
         RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "📍 Moviendo al PRIMER punto [%.2f, %.2f, %.2f]...", wp[0].x, wp[0].y, wp[0].z);
         if(agent_->go_to_waypoint(wp[0].x, wp[0].y, wp[0].z, false)) {
-            while(!agent_->checkIfGoToServiceSucceeded(wp[0].x, wp[0].y, wp[0].z)) {
-                if(isHaltRequested()) return BT::NodeStatus::IDLE;
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            switch (waitForArrival(agent_, wp[0].x, wp[0].y, wp[0].z,
+                  [this]{ return isHaltRequested(); }, std::chrono::milliseconds(100)))
+            {
+              case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+              case ArrivalWaitResult::TIMED_OUT:
+                RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Timeout waiting to reach first point");
+                return BT::NodeStatus::FAILURE;
+              case ArrivalWaitResult::REACHED: break;
             }
-            
+
             RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "📍 Moviendo al SEGUNDO punto [%.2f, %.2f, %.2f]...", wp[1].x, wp[1].y, wp[1].z);
             if(agent_->go_to_waypoint(wp[1].x, wp[1].y, wp[1].z, false)) {
-                while(!agent_->checkIfGoToServiceSucceeded(wp[1].x, wp[1].y, wp[1].z)) {
-                    if(isHaltRequested()) return BT::NodeStatus::IDLE;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                switch (waitForArrival(agent_, wp[1].x, wp[1].y, wp[1].z,
+                      [this]{ return isHaltRequested(); }, std::chrono::milliseconds(100)))
+                {
+                  case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+                  case ArrivalWaitResult::TIMED_OUT:
+                    RCLCPP_ERROR(rclcpp::get_logger("inspect_pv_array"), "[InspectPVArray] Timeout waiting to reach second point");
+                    return BT::NodeStatus::FAILURE;
+                  case ArrivalWaitResult::REACHED: break;
                 }
-                
+
                 RCLCPP_INFO(rclcpp::get_logger("inspect_pv_array"), "✅ Inspección completada con éxito.");
                 sendResult(1);
                 return BT::NodeStatus::SUCCESS;
@@ -896,9 +1233,13 @@ BT::NodeStatus GoNearStation::tick(){
   {
     switch(agent_->state_)
     {
+      case 0: //UNINITIALIZED - also what the platform reports right after a
+              // completed land()+disarm, not just before the first arm
+      case 1: //LANDED_DISARMED
       case 2: //LANDED_ARMED
         if(isHaltRequested())
           return BT::NodeStatus::IDLE;
+        agent_->arm();
         if(!agent_->take_off(agent_->take_off_height_, false))
         {
           if(isHaltRequested())
@@ -908,11 +1249,17 @@ BT::NodeStatus GoNearStation::tick(){
         }
         else
         {
-          while(agent_->state_ != 4)
+          switch (waitForState(
+              [this]() { return agent_->state_ == 4; },
+              [this]() { return isHaltRequested(); }))
           {
-            if(isHaltRequested())
+            case ArrivalWaitResult::HALTED:
               return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(agent_->get_logger(), "⏱️ Timeout esperando a alcanzar el estado FLYING tras despegar.");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED:
+              break;
           }
         }
         break;
@@ -922,12 +1269,14 @@ BT::NodeStatus GoNearStation::tick(){
         RCLCPP_INFO(rclcpp::get_logger("go_near_station"), "[GoNearStation] Moving near Tool...");
         if(agent_->go_to_waypoint(near_tool_pose.getX(), near_tool_pose.getY(), near_tool_pose.getZ(), false))
         {
-          while(!agent_->checkIfGoToServiceSucceeded(near_tool_pose.getX(), near_tool_pose.getY(),
-                near_tool_pose.getZ()))
+          switch (waitForArrival(agent_, near_tool_pose.getX(), near_tool_pose.getY(), near_tool_pose.getZ(),
+                [this]{ return isHaltRequested(); }, std::chrono::milliseconds(1)))
           {
-            if(isHaltRequested())
-              return BT::NodeStatus::IDLE;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            case ArrivalWaitResult::HALTED: return BT::NodeStatus::IDLE;
+            case ArrivalWaitResult::TIMED_OUT:
+              RCLCPP_ERROR(rclcpp::get_logger("go_near_station"), "[GoNearStation] Timeout waiting to reach tool");
+              return BT::NodeStatus::FAILURE;
+            case ArrivalWaitResult::REACHED: break;
           }
           RCLCPP_INFO(rclcpp::get_logger("go_near_station"), "[GoNearStation] Returning SUCCESS...");
           return BT::NodeStatus::SUCCESS;
@@ -940,12 +1289,11 @@ BT::NodeStatus GoNearStation::tick(){
           return BT::NodeStatus::FAILURE;
         }
         break;
-      case 0: //UNINITIALIZED
-      case 1: //LANDED_DISARMED
       case 3: //TAKING_OFF
       case 5: //FLIYING_MANUAL
       case 6: //LANDING
       default:
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         break;
     }
   }
@@ -1685,14 +2033,44 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
     this,
     "/" + beacon_.id + "/GoToBehavior");
 
+  arm_cli_ = this->create_client<std_srvs::srv::SetBool>(
+    "/" + beacon_.id + "/set_arming_state");
+
   // Publishers
   beacon_pub_ = this->create_publisher<mission_planner::msg::AgentBeacon>("/agent_beacon", 1);
+  task_pub_ = this->create_publisher<std_msgs::msg::String>("/" + beacon_.id + "/current_task", 1);
 
   timer_beacon_ = this->create_wall_timer(
     std::chrono::seconds(1), 
     [this]() {
         // Publicamos la estructura beacon_ que ya se inicializa en el constructor
         this->beacon_pub_->publish(this->beacon_);
+
+        // Tarea actual, para el HUD de Gazebo (mission_viz.py).
+        std_msgs::msg::String task_msg;
+        if (!this->task_queue_.empty()) {
+          classes::Task* t = this->task_queue_.front();
+          if (t) task_msg.data = t->getID() + "|" + std::string(1, t->getType());
+        }
+        this->task_pub_->publish(task_msg);
+
+        // Single, bounded heartbeat: one line every 10 s per drone stating
+        // what telemetry ACTUALLY says. Deliberately sourced straight from
+        // the subscriptions rather than from what the behaviour tree believes,
+        // so it can be used to check the tree's own claims - the previous logs
+        // asserted completed landings that telemetry never backed up.
+        char z_buf[32];
+        if (this->poseFresh()) {
+          snprintf(z_buf, sizeof(z_buf), "%.2f m", this->position_.getZ());
+        } else {
+          snprintf(z_buf, sizeof(z_buf), "sin datos");
+        }
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 10000,
+          "[latido] estado=%s(%d) | z=%s | bateria=%.0f%% | tareas=%zu | telemetria=%s",
+          stateName(this->state_), this->state_, z_buf,
+          this->battery_ * 100.0f,
+          this->task_queue_.size(),
+          this->platformInfoFresh() ? "ok" : "AUSENTE");
     });
 
   // Subscribers
@@ -1934,26 +2312,39 @@ AgentNode::~AgentNode()
 
 void AgentNode::positionCallback(const geometry_msgs::msg::PoseStamped::SharedPtr pose) {
   position_.update(pose->pose.position.x, pose->pose.position.y, pose->pose.position.z);
+  pose_received_ = true;
+  last_pose_s_ = nowSeconds();
 }
 
 void AgentNode::batteryCallback(const sensor_msgs::msg::BatteryState::SharedPtr battery) {
   battery_ = battery->percentage;
+
+  // isBatteryEnough() decide si hay que abortar la tarea e ir a recargar, pero
+  // NO se llamaba desde ningun sitio: era codigo muerto, asi que
+  // battery_enough_ se quedaba con su valor inicial (true) para siempre y la
+  // condicion IsBatteryEnough del arbol devolvia SUCCESS aunque la bateria
+  // estuviera al 16%. Reevaluarlo aqui es lo natural: se ejecuta justo cuando
+  // llega una lectura nueva. Es barato (dos comparaciones) y solo actua de
+  // verdad cuando el estado cambia.
+  isBatteryEnough();
 }
 
 void AgentNode::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPtr info) {
     int old_state = state_;
 
+    // Every branch here maps an *explicitly recognised* AS2 status onto our
+    // internal numbering. DISARMED now has its own case: it used to share
+    // `default:` with every unknown/garbage value, which is precisely what
+    // made "no telemetry yet" indistinguishable from "safely on the ground".
+    bool recognised = true;
     switch (info->status.state) {
-        case as2_msgs::msg::PlatformStatus::LANDED:
-            // SI está armado -> Estado 2 (Listo para despegar)
-            // NO está armado -> Estado 1 (Apagado)
-            if(info->armed) {
-                state_ = 2; // LANDED_ARMED
-            } else {
-                state_ = 1; // LANDED_DISARMED
-            }
+        case as2_msgs::msg::PlatformStatus::DISARMED:
+            state_ = 0;
             break;
-            
+        case as2_msgs::msg::PlatformStatus::LANDED:
+            // Armed -> ready to take off; disarmed -> powered down.
+            state_ = info->armed ? 2 : 1;
+            break;
         case as2_msgs::msg::PlatformStatus::TAKING_OFF:
             state_ = 3;
             break;
@@ -1967,19 +2358,82 @@ void AgentNode::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPt
             state_ = 5;
             break;
         default:
-            state_ = 0;
+            // Hold the previous state instead of silently reporting 0.
+            recognised = false;
             break;
     }
 
+    platform_armed_ = info->armed;
+    if (recognised) {
+        platform_info_received_ = true;
+        last_platform_info_s_ = nowSeconds();
+    } else {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+            "[telemetria] Estado de plataforma no reconocido (%d); conservando %s(%d).",
+            static_cast<int>(info->status.state), stateName(state_), state_);
+    }
+
     if (state_ != old_state) {
-        RCLCPP_WARN(this->get_logger(), "📢 CAMBIO DE ESTADO DETECTADO: %d -> %d (Armed: %s)", 
-            old_state, state_, info->armed ? "SI" : "NO");
+        if (poseFresh()) {
+            RCLCPP_INFO(this->get_logger(),
+                "[estado] %s(%d) -> %s(%d) | armado=%s | z=%.2f m",
+                stateName(old_state), old_state, stateName(state_), state_,
+                info->armed ? "si" : "no", position_.getZ());
+        } else {
+            RCLCPP_INFO(this->get_logger(),
+                "[estado] %s(%d) -> %s(%d) | armado=%s | z=sin datos",
+                stateName(old_state), old_state, stateName(state_), state_,
+                info->armed ? "si" : "no");
+        }
     }
-    static bool first_run = true;
-    if(first_run) {
-        RCLCPP_WARN(this->get_logger(), "📢 Recibiendo info del dron. Estado inicial: %d", state_);
-        first_run = false;
+
+    static bool first_info = true;
+    if (first_info) {
+        RCLCPP_INFO(this->get_logger(),
+            "[telemetria] Primer PlatformInfo recibido. Estado inicial: %s(%d).",
+            stateName(state_), state_);
+        first_info = false;
     }
+
+    // landing_in_progress_ mirrors the observed platform state rather than
+    // being managed by whichever BT leaf happened to call land(). If that
+    // leaf's own wait gives up early while the Land action is still running
+    // server-side, a stale `false` here would let a new task fire a GoTo that
+    // fights the still-active Land for control mode - the "flies away instead
+    // of landing" bug.
+    landing_in_progress_ = (state_ == 6);
+}
+
+// --- Telemetry-trust helpers ---------------------------------------------
+bool AgentNode::platformInfoFresh(double max_age_s) const {
+  if (!platform_info_received_) return false;
+  return (nowSeconds() - last_platform_info_s_.load()) <= max_age_s;
+}
+
+bool AgentNode::poseFresh(double max_age_s) const {
+  if (!pose_received_) return false;
+  return (nowSeconds() - last_pose_s_.load()) <= max_age_s;
+}
+
+const char* AgentNode::stateName(int s) {
+  switch (s) {
+    case 0: return "DESARMADO";
+    case 1: return "EN_SUELO_DESARMADO";
+    case 2: return "EN_SUELO_ARMADO";
+    case 3: return "DESPEGANDO";
+    case 4: return "VOLANDO";
+    case 5: return "EMERGENCIA";
+    case 6: return "ATERRIZANDO";
+    default: return "DESCONOCIDO";
+  }
+}
+
+bool AgentNode::isConfirmedLanded(float ground_z) {
+  // Deliberately conservative: missing telemetry is never treated as landed.
+  if (!platformInfoFresh()) return false;
+  if (!(state_ == 0 || state_ == 1 || state_ == 2)) return false;
+  if (!poseFresh()) return false;
+  return position_.getZ() <= (ground_z + kOnGroundAltitudeMargin);
 }
 
 void AgentNode::missionOverCallback(const mission_planner::msg::MissionOver::SharedPtr value) {
@@ -2018,6 +2472,54 @@ void AgentNode::jackalPositionCallback(const geographic_msgs::msg::GeoPoseStampe
 }
 
 // Aerostack2 Action calls
+
+// The platform's own state machine rejects TAKE_OFF from DISARMED with
+// "Invalid transition: DISARMED -> TAKE_OFF" - mission_sequencer.py only
+// arms each drone once at mission start, but the platform auto-disarms
+// after every completed landing. Without an explicit re-arm before each
+// subsequent take_off(), a drone's second (and every later) flight would
+// have its Takeoff goal silently rejected and just wait out our own
+// state-wait timeout every time. Called unconditionally before every
+// take_off() - re-arming an already-armed platform is a harmless no-op
+// server-side (it just logs "UAV is already armed" and returns
+// success=false, which is why this treats a false response as fine to
+// proceed on rather than a hard failure; only a genuinely unreachable
+// service - the server not responding at all - is treated as fatal).
+bool AgentNode::arm() {
+  if (!arm_cli_->wait_for_service(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(this->get_logger(), "❌ Arming service no responde en /%s/set_arming_state", beacon_.id.c_str());
+    return false;
+  }
+
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = true;
+  auto future = arm_cli_->async_send_request(request);
+
+  if (future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    RCLCPP_ERROR(this->get_logger(), "❌ Timeout esperando respuesta de /%s/set_arming_state", beacon_.id.c_str());
+    return false;
+  }
+  auto response = future.get();
+  if (!response->success) {
+    RCLCPP_WARN(this->get_logger(),
+      "⚠️ /%s/set_arming_state devolvió false (normal si ya estaba armado)", beacon_.id.c_str());
+  }
+  return true;
+}
+
+bool AgentNode::cancelGoTo() {
+  if (!goto_ac_) return true;
+  if (!goto_ac_->action_server_is_ready()) return true;
+  auto future = goto_ac_->async_cancel_all_goals();
+  if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready) {
+    RCLCPP_WARN(this->get_logger(),
+      "[movimiento] Timeout cancelando el GoTo pendiente antes de aterrizar.");
+    return false;
+  }
+  RCLCPP_INFO(this->get_logger(), "[movimiento] GoTo pendiente cancelado.");
+  return true;
+}
+
 bool AgentNode::land(bool blocking) {
   // 1. Seguridad: Esperar conexión
   if (!land_ac_->wait_for_action_server(std::chrono::seconds(2))) {
@@ -2027,16 +2529,33 @@ bool AgentNode::land(bool blocking) {
 
   auto goal_msg = as2_msgs::action::Land::Goal();
   goal_msg.land_speed = 0.5; // Velocidad de descenso suave
-  
+
   auto goal_options = rclcpp_action::Client<as2_msgs::action::Land>::SendGoalOptions();
-  
+  // Previously fire-and-forget: with no callbacks, a rejected or aborted
+  // Land goal was indistinguishable from one still quietly in progress -
+  // we only ever inferred landing from the separate platform_info state
+  // topic, so a rejection left the agent waiting on a state transition
+  // that was never coming until our own timeout eventually gave up.
+  goal_options.goal_response_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::Land>::SharedPtr& handle) {
+      if (!handle) {
+        RCLCPP_ERROR(this->get_logger(), "❌ Land goal RECHAZADO por /%s/LandBehavior", beacon_.id.c_str());
+      } else {
+        RCLCPP_INFO(this->get_logger(), "✅ Land goal aceptado por /%s/LandBehavior", beacon_.id.c_str());
+      }
+    };
+  goal_options.result_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::Land>::WrappedResult& result) {
+      RCLCPP_INFO(this->get_logger(), "🛬 [Land] Resultado de la acción: code=%d", static_cast<int>(result.code));
+    };
+
   RCLCPP_INFO(this->get_logger(), "🛬 ENVIANDO ATERRIZAJE...");
   auto future_goal_handle = land_ac_->async_send_goal(goal_msg, goal_options);
-  
+
   if (blocking) {
     auto result_future = land_ac_->async_get_result(future_goal_handle.get());
   }
-  return true; 
+  return true;
 }
 
 bool AgentNode::take_off(float height, bool blocking) {
@@ -2049,16 +2568,28 @@ bool AgentNode::take_off(float height, bool blocking) {
   auto goal_msg = as2_msgs::action::Takeoff::Goal();
   goal_msg.takeoff_height = height;
   goal_msg.takeoff_speed = 1.0; // Velocidad explícita
-  
+
   auto goal_options = rclcpp_action::Client<as2_msgs::action::Takeoff>::SendGoalOptions();
-  
+  goal_options.goal_response_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::Takeoff>::SharedPtr& handle) {
+      if (!handle) {
+        RCLCPP_ERROR(this->get_logger(), "❌ Takeoff goal RECHAZADO por /%s/TakeoffBehavior", beacon_.id.c_str());
+      } else {
+        RCLCPP_INFO(this->get_logger(), "✅ Takeoff goal aceptado por /%s/TakeoffBehavior", beacon_.id.c_str());
+      }
+    };
+  goal_options.result_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::Takeoff>::WrappedResult& result) {
+      RCLCPP_INFO(this->get_logger(), "🚀 [Takeoff] Resultado de la acción: code=%d", static_cast<int>(result.code));
+    };
+
   RCLCPP_INFO(this->get_logger(), "🚀 ENVIANDO DESPEGUE (h=%.2f)...", height);
   auto future_goal_handle = takeoff_ac_->async_send_goal(goal_msg, goal_options);
-  
+
   if (blocking) {
     auto result_future = takeoff_ac_->async_get_result(future_goal_handle.get());
   }
-  return true; 
+  return true;
 }
 
 bool AgentNode::go_to_waypoint(float x, float y, float z, bool blocking) {
@@ -2081,8 +2612,20 @@ bool AgentNode::go_to_waypoint(float x, float y, float z, bool blocking) {
   goal_msg.yaw.mode = as2_msgs::msg::YawMode::KEEP_YAW; 
 
   auto goal_options = rclcpp_action::Client<as2_msgs::action::GoToWaypoint>::SendGoalOptions();
-  
-  RCLCPP_INFO(this->get_logger(), "📍 MOVIENDO a [%.2f, %.2f, %.2f] en frame %s", 
+  goal_options.goal_response_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::GoToWaypoint>::SharedPtr& handle) {
+      if (!handle) {
+        RCLCPP_ERROR(this->get_logger(), "❌ GoTo goal RECHAZADO por /%s/GoToBehavior", beacon_.id.c_str());
+      }
+    };
+  goal_options.result_callback =
+    [this](const rclcpp_action::ClientGoalHandle<as2_msgs::action::GoToWaypoint>::WrappedResult& result) {
+      if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+        RCLCPP_WARN(this->get_logger(), "📍 [GoTo] Resultado de la acción no exitoso: code=%d", static_cast<int>(result.code));
+      }
+    };
+
+  RCLCPP_INFO(this->get_logger(), "📍 MOVIENDO a [%.2f, %.2f, %.2f] en frame %s",
               x, y, z, goal_msg.target_pose.header.frame_id.c_str());
   
   auto future_goal_handle = goto_ac_->async_send_goal(goal_msg, goal_options);
@@ -2122,10 +2665,10 @@ rclcpp_action::GoalResponse AgentNode::handleNewTaskListGoal(
   }
 
   // 2. Escudo contra re-asignaciones redundantes
-  if (!task_queue_.empty()) {
-      RCLCPP_WARN(this->get_logger(), "⚠️ GOAL RECHAZADO: El dron ya está ejecutando tareas. Ignorando nueva misión del planificador para evitar interrupciones (Halt).");
-      return rclcpp_action::GoalResponse::REJECT;
-  }
+  // if (!task_queue_.empty()) {
+  //     RCLCPP_WARN(this->get_logger(), "⚠️ GOAL RECHAZADO: El dron ya está ejecutando tareas. Ignorando nueva misión del planificador para evitar interrupciones (Halt).");
+  //     return rclcpp_action::GoalResponse::REJECT;
+  // }
 
   RCLCPP_INFO(this->get_logger(), "🎯 [handleNewTaskListGoal] GOAL RECIBIDO y ACEPTADO!");
   RCLCPP_INFO(this->get_logger(), "📨 Agent ID del goal: %s | Tareas: %zu", goal->agent_id.c_str(), goal->task_list.size());
@@ -2157,7 +2700,29 @@ void AgentNode::handleNewTaskListAccepted(
   std::thread([this, goal_handle]() {
 
     if(mission_over_) return;
-    
+
+    // Don't overwrite task_queue_ while a landing confirmation is in
+    // flight - see landing_in_progress_'s comment in the header. Applying a
+    // new task here means a leaf like GoNearWP can call go_to_waypoint()
+    // while land() is still active server-side: the platform then gets a
+    // GoTo (POSITION) goal and a Land (SPEED) goal fighting over control
+    // mode simultaneously, and the drone flies off instead of landing.
+    // Bound is 190s - just past the 180s overall-tick-deadline safety net,
+    // which is the SLOWEST path that's still guaranteed to clear this flag.
+    // The previous 20s bound was shorter than the 60s per-wait timeout on
+    // the same flag, so it could (and did) expire while our own code was
+    // still legitimately waiting for a landing that was going to succeed
+    // within that 60s - this is what caused the exact GoTo/Land fight above.
+    auto wait_start = std::chrono::steady_clock::now();
+    while (landing_in_progress_ && rclcpp::ok()) {
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - wait_start).count() > 190.0) {
+        RCLCPP_ERROR(this->get_logger(),
+          "[handleNewTaskListAccepted] Landing confirmation still in progress after 190s (safety nets should have cleared this), applying new task list anyway");
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
     auto goal = goal_handle->get_goal();
     
     RCLCPP_INFO(this->get_logger(), "📋 Procesando %zu tareas para el agente %s", 
@@ -2276,28 +2841,21 @@ void AgentNode::addTaskToQueue(classes::Task* task) {
 }
 
 void AgentNode::removeTaskFromQueue(const std::string& id, char type) {
-    if(task_queue_.empty()) {
-        RCLCPP_WARN(this->get_logger(), "[removeTaskFromQueue] Task queue already empty");
-        return;
-    }
-    
-    classes::Task* task = task_queue_.front();
-    
-    if((id == task->getID()) && (type == task->getType())) {
+    classes::Task* task = task_queue_.popFrontIfMatches(id, type);
+    if (task) {
         delete task;
-        task_queue_.pop();
         return;
     }
-    
-    RCLCPP_WARN(this->get_logger(), "[removeTaskFromQueue] Task isn't in the first place of the queue. Not deleting.");
+
+    if (task_queue_.empty()) {
+        RCLCPP_WARN(this->get_logger(), "[removeTaskFromQueue] Task queue already empty");
+    } else {
+        RCLCPP_WARN(this->get_logger(), "[removeTaskFromQueue] Task isn't in the first place of the queue. Not deleting.");
+    }
 }
 
 void AgentNode::emptyTheQueue() {
-    while(!task_queue_.empty()) {
-        classes::Task* task = task_queue_.front();
-        delete task;
-        task_queue_.pop();
-    }
+    task_queue_.clear();
 }
 
 int AgentNode::getQueueSize() {
@@ -2375,16 +2933,47 @@ void AgentNode::taskQueueManager() {
     }
 }
 
+float AgentNode::batteryNeededToGetHome() {
+    // Autonomia necesaria para volver a la base desde donde estamos, con
+    // reserva. Un umbral fijo del 30% servia estando cerca, pero un dron a 60 m
+    // gasta mas del 30% solo en volver: se quedaba sin bateria a medio camino,
+    // aterrizaba donde podia y ya no habia forma de recuperarlo. Ahora el
+    // umbral SUBE con la distancia, asi que la vuelta se inicia mientras aun
+    // queda autonomia suficiente.
+    if (!poseFresh())
+        return kMinBatteryReserve;
+
+    std::string station = "charging_station_" + id_;
+    auto &stations = known_positions_["charging_stations"];
+    auto it = stations.find(station);
+    if (it == stations.end())
+        return kMinBatteryReserve;
+
+    const float dist = classes::distance2D(position_, it->second);
+    const float seconds_home = dist / kCruiseSpeedMps;
+    const float needed = seconds_home * kBatteryDrainPerSecond + kMinBatteryReserve;
+    // Nunca pedir mas del 90%: si no, un dron lejano no despegaria jamas.
+    return std::min(needed, 0.90f);
+}
+
 void AgentNode::isBatteryEnough() {
     bool previous_state = battery_enough_;
     bool empty_queue = task_queue_.empty();
-    
-    // Planner node has decided that this Agent should stop recharging to go on
-    if(!battery_enough_ && !empty_queue)
+
+    const float threshold = batteryNeededToGetHome();
+    const bool below_threshold = battery_ < threshold;
+
+    // "El planner me ha reactivado": si estando en modo recarga me llega una
+    // tarea, es que el planner ha decidido que siga. Pero SOLO se acepta si la
+    // bateria da de verdad para ello. Sin esa condicion se producia un
+    // flip-flop a 2 Hz: la cola no vacia lo ponia a true, el umbral lo volvia a
+    // poner a false, y el dron nunca llegaba a emprender el regreso mientras se
+    // quedaba sin bateria en el sitio.
+    if(!battery_enough_ && !empty_queue && !below_threshold)
         battery_enough_ = true;
 
     // Check if this Agent has battery enough to fulfill its next task
-    if(battery_ < 0.3)
+    if(below_threshold)
         battery_enough_ = false;
 
     // Charged battery
@@ -2398,8 +2987,14 @@ void AgentNode::isBatteryEnough() {
             return;
         }
         
-        RCLCPP_WARN(this->get_logger(), "[isBatteryEnough] Advertising that battery_enough_ = %s", 
-                   battery_enough_ ? "true" : "false");
+        if(!battery_enough_) {
+            RCLCPP_WARN(this->get_logger(),
+                "[bateria] %.0f%% por debajo del minimo para volver a casa (%.0f%%). Abortando tarea y regresando.",
+                battery_ * 100.0f, threshold * 100.0f);
+        } else {
+            RCLCPP_WARN(this->get_logger(),
+                "[bateria] %.0f%%: autonomia suficiente de nuevo.", battery_ * 100.0f);
+        }
         emptyTheQueue();
         
         if(battery_ac_) {

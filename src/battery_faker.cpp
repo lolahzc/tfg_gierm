@@ -14,6 +14,14 @@ BatteryFaker::BatteryFaker()
 {
     // Declarar todos los parámetros
     this->declare_parameter<std::string>("battery_mode", "static");
+    // Ritmos por tick de 500 ms. Con los valores por defecto un dron pasa de
+    // 100% a 30% (umbral de "bateria insuficiente" en isBatteryEnough) tras
+    // ~87 s de vuelo, y se recarga de 30% a 100% en ~18 s posado en su base.
+    this->declare_parameter<double>("battery_decrease", 0.004);
+    this->declare_parameter<double>("battery_increase", 0.020);
+    // Carga de rescate por tick para un dron varado fuera de una base.
+    // A 0 se desactiva y un dron que se quede sin bateria lejos queda perdido.
+    this->declare_parameter<double>("rescue_trickle", 0.0015);
     this->declare_parameter<std::string>("id", "drone0");  // Valor por defecto específico
     this->declare_parameter<std::string>("pose_topic", "");
     this->declare_parameter<std::string>("state_topic", "");
@@ -21,6 +29,16 @@ BatteryFaker::BatteryFaker()
 
     // Obtener parámetros PRIMERO
     this->get_parameter("battery_mode", battery_mode_);
+    {
+      double dec = 0.004, inc = 0.020;
+      double resc = 0.0015;
+      this->get_parameter("battery_decrease", dec);
+      this->get_parameter("battery_increase", inc);
+      this->get_parameter("rescue_trickle", resc);
+      battery_decrease_ = static_cast<float>(dec);
+      battery_increase_ = static_cast<float>(inc);
+      rescue_trickle_ = static_cast<float>(resc);
+    }
     this->get_parameter("id", id_);
     this->get_parameter("pose_topic", pose_topic_);
     this->get_parameter("state_topic", state_topic_);
@@ -81,11 +99,19 @@ BatteryFaker::BatteryFaker()
     
     battery_.percentage = 1.0f;
 
-    // Timer para actualizar la batería
-    auto timer = this->create_wall_timer(
+    // Timer para actualizar la batería. Guardado en un miembro: como local se
+    // destruía al terminar el constructor y update_battery() no se llamaba nunca.
+    timer_ = this->create_wall_timer(
         std::chrono::milliseconds(500),
         std::bind(&BatteryFaker::update_battery, this));
+
+    RCLCPP_INFO(this->get_logger(),
+        "[bateria] Faker activo (modo=%s): descarga %.4f/tick, carga %.4f/tick (tick=500 ms).",
+        battery_mode_.c_str(), battery_decrease_, battery_increase_);
 }
+
+// Tope de la carga de rescate: lo justo para volver a una base, no mas.
+static constexpr float kRescueThreshold = 0.55f;
 
 void BatteryFaker::update_battery() {
     int flag;
@@ -124,6 +150,23 @@ void BatteryFaker::update_battery() {
                         battery_.percentage = battery_.percentage + battery_increase_;
                         if(battery_.percentage > 1.0f)
                             battery_.percentage = 1.0f;
+                    } else if(rescue_trickle_ > 0.0f && battery_.percentage < kRescueThreshold) {
+                        // Rescate: un dron que se queda sin bateria lejos aterriza
+                        // donde puede y, sin esto, se queda INUTILIZADO para siempre
+                        // (no esta en una base, luego nunca recarga, luego nunca
+                        // puede volver a una base). Con una carga lenta acaba
+                        // teniendo autonomia para regresar el solo. Es mucho mas
+                        // lento que la carga en base, asi que no quita sentido a
+                        // volver a casa; solo evita perder el dron.
+                        battery_.percentage += rescue_trickle_;
+                        if(battery_.percentage > kRescueThreshold)
+                            battery_.percentage = kRescueThreshold;
+                        if(!rescue_announced_) {
+                            RCLCPP_WARN(this->get_logger(),
+                                "[bateria] %s quedo en tierra fuera de una base; carga de rescate lenta hasta el %.0f%% para que pueda volver.",
+                                id_.c_str(), kRescueThreshold * 100.0f);
+                            rescue_announced_ = true;
+                        }
                     }
                     break;
                 case 3: // TAKING_OFF
@@ -202,10 +245,22 @@ void BatteryFaker::positionCallback(const geometry_msgs::msg::PoseStamped::Share
 }
 
 void BatteryFaker::platformInfoCallback(const as2_msgs::msg::PlatformInfo::SharedPtr info) {
-    // Mapear estados de Aerostack2 a los estados originales
+    // Mapear estados de Aerostack2 a los estados originales.
+    //
+    // OJO con DISARMED: antes caia en el `default:` y se mapeaba a 0
+    // (UNINITIALIZED), que en update_battery() no recarga en ningun modo. Pero
+    // los drones SE DESARMAN al terminar de aterrizar, asi que ese era su
+    // estado normal estando posados en la base: el faker nunca veia los
+    // estados 1/2, los unicos que recargan, y la bateria se quedaba clavada
+    // (observado: drone2 al 0% "recargando" indefinidamente sobre su propia
+    // estacion). DISARMED significa "en el suelo", asi que va con los estados
+    // de aterrizado.
     switch (info->status.state) {
+        case as2_msgs::msg::PlatformStatus::DISARMED:
+            state_ = 1; // en el suelo, desarmado
+            break;
         case as2_msgs::msg::PlatformStatus::LANDED:
-            state_ = 1; // LANDED_DISARMED
+            state_ = info->armed ? 2 : 1; // en el suelo, armado o no
             break;
         case as2_msgs::msg::PlatformStatus::TAKING_OFF:
             state_ = 3; // TAKING_OFF
