@@ -19,8 +19,7 @@ The architecture has two layers:
 The low-level controllers are not part of this work; simple stand-ins are
 included so the software layer can be exercised in simulation.
 
-[![Simulación Completa Multi-UAV](https://img.youtube.com/vi/odCpxHCSUTk/maxresdefault.jpg)](https://www.youtube.com/watch?v=odCpxHCSUTk)
-
+[![Simulación Completa Multi-UAV](https://img.youtube.com/vi/odCpxHCSUTk/hqdefault.jpg)](https://www.youtube.com/watch?v=odCpxHCSUTk)
 
 ## Repository layout
 
