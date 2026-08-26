@@ -13,6 +13,7 @@
 #include <sstream>
 #include <functional>
 #include <algorithm>
+#include <atomic>
 #include <rclcpp_action/rclcpp_action.hpp>
 
 #include "mission_planner/classes.hpp"
@@ -31,6 +32,7 @@
 #include "mission_planner/action/heuristic_planning.hpp"
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/point.hpp"
 #include "sensor_msgs/msg/battery_state.hpp"
 #include "geographic_msgs/msg/geo_point.hpp"
 #include "as2_msgs/msg/pose_stamped_with_id.hpp" // No se si lo queremos con/sin ID
@@ -140,6 +142,7 @@ class Agent{
     std::string getType();
 	float getBattery();
 	bool getLastBeaconTimeout();
+	classes::Position getPosition();
 
 	//Setters
 	void setLastBeaconTime(rclcpp::Time last_beacon_time);
@@ -167,6 +170,14 @@ class Planner : public rclcpp::Node {
   private:
 
 	rclcpp_action::Client<mission_planner::action::HeuristicPlanning>::SharedPtr hp_ac_;
+	// Kept alive until the result arrives: rclcpp_action stops delivering the
+	// result callback once every reference to the goal handle is dropped, and
+	// async_send_goal()'s handle would otherwise go out of scope right after
+	// goal_response_callback returns.
+	rclcpp_action::ClientGoalHandle<mission_planner::action::HeuristicPlanning>::SharedPtr hp_goal_handle_;
+	// Guards against sending a new HeuristicPlanning goal while one is still in
+	// flight (performTaskAllocation is called on every beacon/task event).
+	std::atomic_bool hp_allocation_in_progress_{false};
 	rclcpp_action::Server<mission_planner::action::NewTask>::SharedPtr nt_as_;
 
     rclcpp_action::GoalResponse handle_goal(

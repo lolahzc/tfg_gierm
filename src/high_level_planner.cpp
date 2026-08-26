@@ -32,22 +32,32 @@ Agent::Agent(Planner* planner,
   battery_(1.0),
   battery_enough_(true)
 {
-  // Nodo local del agente
-  nh_ = rclcpp::Node::make_shared("agent_node_" + id_);  
+  // Nodo local del agente. OJO: solo se usa para logging y para los clientes
+  // de accion (enviar un goal no necesita spin). NO se le pueden colgar
+  // suscripciones: este nodo no lo spinea nadie.
+  nh_ = rclcpp::Node::make_shared("agent_node_" + id_);
 
-  // Obtener nombres de topics (o usar defaults)
-  nh_->declare_parameter<std::string>("pose_topic", "/ual/pose");
-  nh_->declare_parameter<std::string>("battery_topic", "/battery_fake");
-  nh_->get_parameter("pose_topic", pose_topic_);
-  nh_->get_parameter("battery_topic", battery_topic_);
+  // Topics reales de AEROSTACK2 / battery_faker. Los valores que habia aqui
+  // ("/ual/pose" y "/battery_fake") son de la epoca ROS1 y ya no existen, y
+  // ademas nadie los sobreescribia desde el launch.
+  pose_topic_ = "/self_localization/pose";
+  battery_topic_ = "/sensor_measurements/battery";
 
-  // Crear subscriptores
-  position_sub_ = nh_->create_subscription<geometry_msgs::msg::PoseStamped>(
+  // Las suscripciones se crean sobre el NODO DEL PLANNER, que si se spinea.
+  // Colgadas de nh_ no llegaba ni un mensaje, asi que battery_ se quedaba en
+  // su valor inicial 1.0 y position_ en el origen para todos los agentes. Con
+  // eso el filtro `getBattery() > 0.3` de performTaskAllocation() daba
+  // siempre cierto (se asignaban tareas a drones casi descargados) y las
+  // agent_positions que recibia el planificador heuristico eran todas (0,0,0),
+  // de modo que "asignar al agente mas cercano" no significaba nada y las
+  // tareas lejanas podian caer en el dron peor situado.
+  position_sub_ = planner_->create_subscription<geometry_msgs::msg::PoseStamped>(
       "/" + id_ + pose_topic_, rclcpp::SensorDataQoS(),
       std::bind(&Agent::positionCallbackAS2, this, _1));
 
-  battery_sub_ = nh_->create_subscription<sensor_msgs::msg::BatteryState>("/" + id_ + battery_topic_, 10,
-                      std::bind(&Agent::batteryCallback, this, _1));
+  battery_sub_ = planner_->create_subscription<sensor_msgs::msg::BatteryState>(
+      "/" + id_ + battery_topic_, 10,
+      std::bind(&Agent::batteryCallback, this, _1));
 
   // Crear clientes y servidores de acciones
   ntl_ac_ = rclcpp_action::create_client<mission_planner::action::NewTaskList>(nh_, "/" + id_ + "/task_list");
@@ -107,7 +117,7 @@ bool Agent::isBatteryEnough(classes::Task* task)
 
 bool Agent::checkBeaconTimeout(rclcpp::Time now)
 {
-  auto timeout = rclcpp::Duration::from_seconds(15.0);
+  auto timeout = rclcpp::Duration::from_seconds(60.0);
   if ((now - last_beacon_time_) > timeout)
     return true;
   else 
@@ -194,7 +204,15 @@ void Agent::sendQueueToAgent()
 {
   RCLCPP_INFO(nh_->get_logger(), "🔄 [sendQueueToAgent] Enviando cola de tareas al agente %s", id_.c_str());
   
-  ntl_ac_->wait_for_action_server(std::chrono::seconds(5));
+  // 1 s, no 5: esto se llama desde el bucle principal del planner, asi que
+  // cada segundo de espera es un segundo sin procesar beacons ni resultados.
+  // El servidor del agente ya esta levantado en cuanto el agente se conecta.
+  if (!ntl_ac_->wait_for_action_server(std::chrono::seconds(1))) {
+    RCLCPP_WARN(nh_->get_logger(),
+      "[sendQueueToAgent] El agente %s no expone su servidor de NewTaskList; omitiendo envio.",
+      id_.c_str());
+    return;
+  }
   mission_planner::action::NewTaskList::Goal goal;
 
   goal.agent_id = id_;
@@ -256,9 +274,10 @@ void Agent::sendQueueToAgent()
         break;
         
       case 'R': case 'r':
-        task_msg.recharge.charging_station_id = task->getChargingStationID();
-        task_msg.recharge.initial_percentage = task->getInitialPercentage();
-        task_msg.recharge.final_percentage = task->getFinalPercentage();
+        task_msg.recharge.charging_station_id = "charging_station_" + id_; 
+        task_msg.recharge.initial_percentage = 0.3; // Límite para volver a casa
+        task_msg.recharge.final_percentage = 0.99;  // Recarga hasta el 99%
+        
         RCLCPP_INFO(nh_->get_logger(), "   - Station: '%s', Init: %f, Final: %f", 
                     task_msg.recharge.charging_station_id.c_str(),
                     task_msg.recharge.initial_percentage,
@@ -854,6 +873,11 @@ bool Agent::getLastBeaconTimeout()
   return last_beacon_.timeout;
 }
 
+classes::Position Agent::getPosition()
+{
+  return position_;
+}
+
 // ---------------- Class Agent Setters ---------------- //
 
 void Agent::setLastBeaconTime(rclcpp::Time last_beacon_time)
@@ -1155,13 +1179,33 @@ Planner::Planner(mission_planner::msg::PlannerBeacon beacon) :
 
     RCLCPP_INFO(get_logger(), "[Planner] Entering main while loop...");
 
-    rclcpp::Rate beacon_rate(beacon_rate_);
+    // El bucle spinea a 20 Hz pero sigue publicando el beacon a beacon_rate_
+    // (1 Hz), que es lo que esperan los agentes.
+    //
+    // Antes ambas cosas iban al mismo ritmo: spin_some() se llamaba UNA VEZ
+    // POR SEGUNDO. Como en la misma iteracion hay llamadas bloqueantes
+    // (sendQueueToAgent -> wait_for_action_server), el executor podia pasar
+    // varios segundos seguidos sin procesar nada, y los beacons de los
+    // agentes se quedaban sin atender. Con 3 drones publicando en
+    // /agent_beacon eso hacia que agentes vivos superasen el timeout de 60 s
+    // y el planner los diese por desconectados ("Destruyendo agente"),
+    // quedandose con un solo dron disponible al que asignar todo el trabajo
+    // mientras los otros dos se quedaban parados al 100% de bateria.
+    constexpr double kSpinHz = 20.0;
+    rclcpp::Rate loop_rate(kSpinHz);
+    const double beacon_period = 1.0 / beacon_rate_;
+    auto last_beacon_pub = now();
     while(rclcpp::ok() && !mission_over_) {
       checkBeaconsTimeout(now());
-      beacon_.timestamp = now();
-      beacon_pub_->publish(beacon_);
+
+      if ((now() - last_beacon_pub).seconds() >= beacon_period) {
+        beacon_.timestamp = now();
+        beacon_pub_->publish(beacon_);
+        last_beacon_pub = now();
+      }
+
       rclcpp::spin_some(get_node_base_interface());
-      beacon_rate.sleep(); 
+      loop_rate.sleep();
     }
 
     RCLCPP_INFO(this->get_logger(), "[Planner] Mission Over. Waiting for the agents to finish");
@@ -1169,7 +1213,7 @@ Planner::Planner(mission_planner::msg::PlannerBeacon beacon) :
     while(rclcpp::ok() && !agent_map_.empty()) {
       checkBeaconsTimeout(now());
       rclcpp::spin_some(get_node_base_interface());
-      beacon_rate.sleep();
+      loop_rate.sleep();
     }
 
     for(auto &task: pending_tasks_)
@@ -1545,8 +1589,43 @@ void Planner::missionOverCallback(const mission_planner::msg::MissionOver::Share
   mission_over_ = value->value;
 }
 
+// Best-effort representative position for distance-aware task assignment.
+// Falls back to the origin for task types with no meaningful single
+// location (MonitorUGV, Recharge without a fixed station, Wait) - the
+// heuristic planner still works for those, it just can't rank agents by
+// distance for them.
+static classes::Position getTaskPositionForDistance(classes::Task* task)
+{
+  switch (task->getType()) {
+    case 'M':
+      return task->getHumanPosition();
+    case 'I':
+    case 'A': {
+      auto waypoints = task->getInspectWaypoints();
+      if (!waypoints.empty()) {
+        return classes::Position(waypoints.front().x, waypoints.front().y, waypoints.front().z);
+      }
+      return classes::Position();
+    }
+    case 'D':
+      return task->getToolPosition();
+    case 'R':
+      return task->getChargingStation();
+    default:
+      return classes::Position();
+  }
+}
+
 void Planner::performTaskAllocation()
 {
+  // Called on every beacon/task event; skip if a goal is already in flight
+  // instead of piling up overlapping HeuristicPlanning goals.
+  bool expected = false;
+  if (!hp_allocation_in_progress_.compare_exchange_strong(expected, true)) {
+    RCLCPP_INFO(get_logger(), "[performTaskAllocation] ⏭️ Allocation already in progress, skipping");
+    return;
+  }
+
   RCLCPP_INFO(get_logger(), "[performTaskAllocation] 🔄 Starting async task allocation...");
 
   // Ejecutar en un thread separado para no bloquear
@@ -1556,19 +1635,56 @@ void Planner::performTaskAllocation()
 
     if (!hp_ac_->wait_for_action_server(std::chrono::seconds(5))) {
       RCLCPP_ERROR(this->get_logger(), "[performTaskAllocation] ❌ Heuristic planning action server not available");
+      hp_allocation_in_progress_ = false;
       return;
     }
 
     auto goal = mission_planner::action::HeuristicPlanning::Goal();
-    
+
     for(auto &agent : agent_map_) {
       if(agent.second.getBattery() > 0.3) {
         goal.available_agents.push_back(agent.first);
-      }  
+        auto agent_pos = agent.second.getPosition();
+        geometry_msgs::msg::Point agent_point;
+        agent_point.x = agent_pos.getX();
+        agent_point.y = agent_pos.getY();
+        agent_point.z = agent_pos.getZ();
+        goal.agent_positions.push_back(agent_point);
+      } else {
+        // Bateria por debajo del umbral: este agente no entra en el solver,
+        // pero antes simplemente se le descartaba y se quedaba SIN NADA que
+        // hacer. El unico sitio que asignaba recarga era la rama "t_R" del
+        // resultado del planificador heuristico, y el simulador
+        // (heuristic_planner_simulator) no emite ningun t_R - de hecho la
+        // accion HeuristicPlanning ni siquiera transporta el nivel de
+        // bateria. Resultado observado: el dron vaciaba su cola al detectar
+        // bateria baja, no recibia tarea de recarga, y GoNearChargingStation
+        // se quedaba repitiendo "First task of the queue isn't type Recharge"
+        // mientras el dron seguia posado donde se quedo sin bateria, a 13 m
+        // de su estacion.
+        //
+        // La recarga es una respuesta de seguridad, no una decision de
+        // optimizacion, asi que la asigna el planner directamente. Solo si la
+        // cola esta vacia: el agente la vacia justo antes de avisar, y asi no
+        // se apila la misma tarea en cada ronda de asignacion.
+        if(agent.second.getQueueSize() == 0) {
+          RCLCPP_WARN(this->get_logger(),
+            "[performTaskAllocation] 🔋 %s con bateria %.0f%% (<=30%%): asignando recarga.",
+            agent.first.c_str(), agent.second.getBattery() * 100.0f);
+          agent.second.addTaskToQueue(recharge_task_);
+          agent.second.sendQueueToAgent();
+        }
+      }
     }
 
     for(auto &task : pending_tasks_) {
       goal.remaining_tasks.push_back(task.first);
+      auto task_pos = getTaskPositionForDistance(task.second);
+      geometry_msgs::msg::Point task_point;
+      task_point.x = task_pos.getX();
+      task_point.y = task_pos.getY();
+      task_point.z = task_pos.getZ();
+      goal.task_positions.push_back(task_point);
     }
 
     RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] 🎯 Requesting allocation for %zu agents, %zu tasks", 
@@ -1577,13 +1693,16 @@ void Planner::performTaskAllocation()
     // SOLUCIÓN CORRECTA: Usar lambdas directamente sin std::bind
     auto send_goal_options = rclcpp_action::Client<mission_planner::action::HeuristicPlanning>::SendGoalOptions();
     
-    send_goal_options.goal_response_callback = 
-      [this](auto future) {
-        auto goal_handle = future.get();
+    send_goal_options.goal_response_callback =
+      [this](auto goal_handle) {
         if (!goal_handle) {
           RCLCPP_ERROR(this->get_logger(), "[goalResponse] ❌ Goal was rejected by server");
+          // Rejected: no result_callback will ever fire for this goal.
+          hp_allocation_in_progress_ = false;
         } else {
           RCLCPP_INFO(this->get_logger(), "[goalResponse] ✅ Goal accepted by server");
+          // Keep the handle alive, or rclcpp_action stops delivering the result.
+          hp_goal_handle_ = goal_handle;
         }
       };
     
@@ -1605,6 +1724,11 @@ void Planner::handleHeuristicPlanningResult(
 {
   RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] 📥 Result received!");
 
+  // This goal is done one way or another: free the handle and let the next
+  // beacon/task event start a new allocation.
+  hp_goal_handle_.reset();
+  hp_allocation_in_progress_ = false;
+
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
       if(result.result->success) {
@@ -1618,17 +1742,29 @@ void Planner::handleHeuristicPlanningResult(
 
         for(auto &queue : result.result->planning_result) {
           auto agent_id = queue.agent_id;
+
+          // agent_map_[agent_id] would silently default-construct a broken
+          // Agent (null action clients -> segfault in sendQueueToAgent below)
+          // if this agent disconnected between sending the goal and this
+          // async result arriving. Skip its queue instead of crashing.
+          auto agent_map_itr = agent_map_.find(agent_id);
+          if (agent_map_itr == agent_map_.end()) {
+            RCLCPP_WARN(this->get_logger(),
+              "[handleHeuristicPlanningResult] Planning result for unknown/disconnected agent '%s', skipping",
+              agent_id.c_str());
+            continue;
+          }
           RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Processing queue for agent: %s", agent_id.c_str());
-          
+
           for(auto &task_msg : queue.queue) {
             if(task_msg.id == "t_R") {
-              agent_map_[agent_id].addTaskToQueue(recharge_task_);
+              agent_map_itr->second.addTaskToQueue(recharge_task_);
               RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Added recharge task to %s", agent_id.c_str());
             } else {
               auto task_itr = pending_tasks_.find(task_msg.id);
               if(task_itr != pending_tasks_.end()) {
-                agent_map_[agent_id].addTaskToQueue(task_itr->second);
-                RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Added task %s to %s", 
+                agent_map_itr->second.addTaskToQueue(task_itr->second);
+                RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Added task %s to %s",
                            task_msg.id.c_str(), agent_id.c_str());
               }
             }
