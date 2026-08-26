@@ -6,7 +6,7 @@ This repository contains an architecture for mission planning and execution in h
 
 This software architecture consists of two layers: a High-Level Planner, centralized on the ground station, and an Agent Behavior Manager, distributed on board each UAV. In this way, the High-Level Planner receives task requests as input, and its work is to solve a resource-constrained problem that allows distributing tasks among the team taking into account vehicles’ capabilities and battery constraints. The Agent Behavior Manager, based on Behavior Trees, is in charge of executing and supervising those plans, calling the appropriate lower-level controllers at any given time. The controllers for each specific action inside each of the tasks are not included in this work, but simple versions of those controllers can be found in this repository in order to be able to test the software layer properly in simulation. Last, replanning operations are triggered in case of unforeseen events, such as vehicle faults or communication drop-outs.
 
-The system is flexible and different modules could be plugged in as High-level Planner as long as they resolve MRTA missions for heterogeneous teams of UAVs. A specific MRTA planner in a separate [repository](https://github.com/multirobot-use/mrta_heuristic_planner), written in Matlab, has been successfully integrated in the architectured contained in the current repository. This Matlab code is connected with ROS through the [matlab_ros_connector](scripts/matlab_ros_connector.m) script available in the scripts folder, which implements a ROS Action Server that receives planning and replanning requests from a High-Level Planner.
+The system is flexible and different modules could be plugged in as High-level Planner as long as they resolve MRTA missions for heterogeneous teams of UAVs. A specific MRTA planner in a separate [repository](https://github.com/multirobot-use/mrta_heuristic_planner), written in Matlab, has been successfully integrated in the architectured contained in the current repository. This Matlab code is connected with ROS 2 through the [matlab_ros2_connector](scripts/matlab_ros2_connector.m) script available in the scripts folder, which implements a ROS 2 Action Server that receives planning and replanning requests from a High-Level Planner.
 
 If you are using this software layer or you found this approach inspiring for your own research, please cite:
 
@@ -23,216 +23,99 @@ If you are using this software layer or you found this approach inspiring for yo
 
 ## Installation
 
-This software has been developed on Ubuntu 20.04 with ROS Noetic. To install the repository correctly, you have to follow the next steps:
+This software has been migrated to Ubuntu with **ROS 2 (Jazzy)** and integrates with
+[AEROSTACK2](https://github.com/aerostack2/aerostack2) for UAV platform/estimation/control/
+behaviors instead of MAVROS/UAL. To build it:
 
-0.1. ROS Noetic installation
+1. Install ROS 2 Jazzy following the [official instructions](https://docs.ros.org/en/jazzy/Installation.html).
 
-```bash
-sudo sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros-latest.list'
-curl -s https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | sudo apt-key add -
-sudo apt update
-sudo apt install -y ros-noetic-desktop-full
-echo "source /opt/ros/noetic/setup.bash" >> ~/.bashrc
-source ~/.bashrc
-sudo apt install -y python-rosdep python-rosinstall python-rosinstall-generator python-wstool build-essential
-sudo rosdep init
-rosdep update
-```
+2. Install AEROSTACK2 as a sibling colcon workspace (`~/aerostack2`), following its own
+   [installation guide](https://aerostack2.github.io/), including the Gazebo simulation packages
+   (`as2_platform_gazebo`, `as2_state_estimator`, `as2_motion_controller`, `as2_behaviors_motion`,
+   `as2_gazebo_assets`) and `ros_gz_bridge`.
 
-0.2. (Recomended) Catkin tools
+3. Install the remaining dependencies:
 
 ```bash
-sudo sh \
-    -c 'echo "deb http://packages.ros.org/ros/ubuntu `lsb_release -sc` main" \
-        > /etc/apt/sources.list.d/ros-latest.list'
-wget http://packages.ros.org/ros.key -O - | sudo apt-key add -
-sudo apt-get update
-sudo apt-get install -y python-catkin-tools
+sudo apt install -y libeigen3-dev libzmq3-dev libboost-dev yaml-cpp
+sudo apt install -y ros-jazzy-behaviortree-cpp-v3 ros-jazzy-geographic-msgs
 ```
 
-1. Install necessary packages
+4. Create a workspace and clone this repository into `src/`:
 
 ```bash
-sudo apt install -y libeigen3-dev ros-noetic-geodesy ros-noetic-joy ros-noetic-multimaster-fkie
-sudo pip install pynput
-sudo apt install -y xz-utils
-sudo apt-get install -y libzmq3-dev libboost-dev
-sudo apt-get install -y ros-noetic-behaviortree-cpp-v3
+mkdir -p ~/tfg/src
+cd ~/tfg/src
+git clone https://github.com/lolahzc/tfg_gierm.git mission_planner
+git clone https://github.com/multirobot-use/mrta_heuristic_planner.git   # Matlab MRTA solver (optional)
 ```
 
-2. Create a ROS workspace
+5. Build:
 
 ```bash
-mkdir -p ~/mission_planner_ws/src
-cd ~/mission_planner_ws/
-catkin build -DPYTHON_EXECUTABLE=/usr/bin/python
-source devel/setup.bash
-echo "source $HOME/mission_planner_ws/devel/setup.bash" >> ~/.bashrc
+cd ~/tfg
+source /opt/ros/jazzy/setup.bash
+source ~/aerostack2/install/setup.bash
+colcon build --packages-select mission_planner
+source install/setup.bash
 ```
 
-3. Clone this repository and other ones as dependencies
+6. Matlab setup (optional, only needed to run the real heuristic planner instead of the
+   `heuristic_planner_simulator` faker)
+
+To connect Matlab to ROS 2, install the [ROS Toolbox](https://www.mathworks.com/products/ros.html),
+then generate the ROS 2 message classes with the [gen_matlab_msgs_ros2](scripts/gen_matlab_msgs_ros2.m)
+script:
 
 ```bash
-cd ~/mission_planner_ws/src/
-git clone https://github.com/multirobot-use/mrta_execution_architecture.git
-git clone https://github.com/multirobot-use/mrta_heuristic_planner.git
-git clone https://github.com/grvcTeam/grvc-ual.git
-git clone https://github.com/grvcTeam/grvc-utils.git
+cd ~/tfg/src/mission_planner/scripts
+matlab -nodisplay -nosplash -r "gen_matlab_msgs_ros2; exit"
 ```
 
-5. Ignore some packages
-
-```bash
-touch ~/mission_planner_ws/src/grvc-utils/mission_lib/CATKIN_IGNORE
-```
-
-6. Install Groot and its dependencies
-
-```bash
-cd ~/mission_planner_ws/src/
-sudo apt install -y qtbase5-dev libqt5svg5-dev libzmq3-dev libdw-dev
-git clone https://github.com/BehaviorTree/Groot.git
-touch ~/mission_planner_ws/src/Groot/CATKIN_IGNORE
-cd ..
-rosdep install --from-paths src --ignore-src
-catkin build
-```
-
-7. Install and configure UAL. Only MAVROS needed. Make sure to install its dependencies when asked
-
-```bash
-cd ~/mission_planner_ws/src/grvc-ual
-./configure.py
-```
-
-8. Install MAVROS packages
-
-```bash
-sudo apt install -y ros-noetic-mavros ros-noetic-mavros-extras
-sudo geographiclib-get-geoids egm96-5
-sudo usermod -a -G dialout $USER
-sudo apt remove modemmanager
-```
-
-9.1 (Optional) Install RealSense plugins for real-life execution
-
-```bash
-sudo apt install -y ros-noetic-realsense2-camera ros-noetic-realsense2-description
-```
-
-9.2 (Optional) Download 99-realsense-libusb.rules file from [github](https://github.com/IntelRealSense/librealsense/blob/master/config/99-realsense-libusb.rules)
-
-9.3 (Optional) Give permissions to read the data from the RealSense camera
-
-```bash
-sudo cp 99-realsense-libusb.rules /etc/udev/rules.d/99-realsense-libusb.rules
-```
-
-10. Install PX4 for SITL simulations
-
-```bash
-sudo apt install -y libgstreamer1.0-dev python-jinja2 python-pip
-pip install numpy toml
-cd ~/mission_planner_ws/src/
-git clone https://github.com/PX4/Firmware.git
-cd Firmware
-git checkout v1.10.2
-git submodule update --init --recursive
-make
-make px4_sitl_default gazebo
-```
-
-11. Build
-
-```bash
-cd ~/mission_planner_ws/
-catkin build
-```
-
-**Note**: In case that the installation did not go well, try compile each package individually.
-
-12. Matlab setup
-
-To use ROS with Matlab, we need the [ROS Toolbox](https://www.mathworks.com/products/ros.html). Once the toolbox is installed, in order to set up the Matlab-ROS connection, you need to open Matlab as admin (to be able to save Matlab's path) and then run the [gen_matlab_msgs](scripts/gen_matlab_msgs.m) script.
-
-```bash
-roscd mission_planner
-cd scripts
-sudo matlab -nodisplay -nosplash -r "gen_matlab_msgs; exit"
-```
-
-You will also need to include the [mrta_heuristic_planner](https://github.com/multirobot-use/mrta_heuristic_planner) installation folder and subfolders in the MATLAB's path.
-
-If you experience problems related with the python executable while executing the above script, you may find useful to create a virtual python environment. For instance, if ROS needs python3.8 to be the default python executable, but MATLAB 2023b needs python3.9., creating a virtual python environment and specifying it's executable route in the ROS Toolbox Preferences could solve this issue:
-
-```bash
-cd ~
-python3.9 -m venv matlab_env
-```
-
-```matlab
-pyenv('Version', '~/matlab_env/bin/python3.9')
-```
+You will also need to include the [mrta_heuristic_planner](https://github.com/multirobot-use/mrta_heuristic_planner)
+installation folder and subfolders in MATLAB's path, and use the
+[matlab_ros2_connector](scripts/matlab_ros2_connector.m) script to run the ROS 2 action server
+that handles planning/replanning requests.
 
 ## Test
 
-To test if the system is working correctly, you can launch a simulation and order tasks or unexpected events by executing Makefile recipes.
-
-**Note**: The `Simulation.launch` file has some parameters to facilitate the configuration of the simulations, having parameters to select the number of UAVs, the Gazebo world, debug modes and some other things. See the heading of the file to know the different world options.
-
-```bash
-make launch
-...
-make monitor task_id=1 human_target=human_target_1 number=2 distance=1.5
-make inspect task_id=2
-make deliver task_id=3 human_target=human_target_1 tool=hammer
-...
-make battery_off agent_id=1
-make battery_ok  agent_id=1
-...
-make mission_over
-...
-rosnode kill /uav_1/agent_behaviour_manager
-rosrun mission_planner agent_behaviour_manager __ns:uav_1
-...
-rosnode kill /high_level_planner
-```
-
-**Note**: For information on how to launch tasks manually, you can run `make gesture_info` or just read the recipes in the Makefile.
-
-You can also use the `tmuxinator` tool to launch the simulation nodes in a more organized way using the [launch script](scripts/launch_matlab_ros_connection.sh) available in the scripts folder. This script creates a tmux session according to the specifications present in the [config file](scripts/matlab_ros_connection.yml). To use this method, you'll need to install `tmuxinator` and incorporate some shell additions to our terminal:
+To test that the system works, launch a simulation and inject tasks or unforeseen events via
+`ros2` CLI commands, in place of the old Makefile recipes:
 
 ```bash
-sudo apt install tmuxinator
-chmod +x scripts/launch_matlab_ros_connection.sh
-source scripts/shell_additions.sh
+ros2 launch mission_planner mission_simulation.launch.py
+...
+ros2 run mission_planner gesture_recognition_faker task_1 M human_target_1 1.5 2   # monitor
+ros2 run mission_planner gesture_recognition_faker task_2 I 0 7 3 7 7 3            # inspect
+ros2 run mission_planner gesture_recognition_faker task_3 D hammer human_target_1  # deliver
+...
+ros2 topic pub /uav1/battery_fake/control mission_planner/msg/BatteryControl "{mode: 2, value: 0.2, discharge_rate: 0.01, charge_rate: 0.01}"
+...
+ros2 topic pub /mission_over mission_planner/msg/MissionOver "{value: true}"
+...
+ros2 node kill /uav1/agent_behaviour_manager   # (or Ctrl-C the process)
+ros2 run mission_planner agent_behaviour_manager --ros-args -r __ns:=/uav1
 ```
 
-Now you can launch the simulation using `tmuxinator`:
-
-```bash
-./scripts/launch_matlab_ros_connection.sh
-```
+For a multi-UAV swarm run, `launch/mission_launch.py` (`n_drones` argument) plus
+`scripts/mission_sequencer.py` automate arming/offboard-mode setup and task injection.
 
 ## Monitoring the Behavior Tree execution with Groot
 
-There is a Make recipe to launch a Groot node that monitors the execution of the Behavior Trees in real time or replays a log file.
+Each agent's `agent_behaviour_manager` exposes a BehaviorTree.CPP v3 ZMQ publisher that
+[Groot](https://github.com/BehaviorTree/Groot) can connect to, to monitor Behavior Tree execution
+in real time or replay a log file.
 
-
-```bash
-make groot
-```
-
-To monitor a Behavior Tree, you just has to specify:
+To monitor a Behavior Tree, specify:
 
 * Server IP: localhost
 * Publisher Port: 1666 + (ID - 1) * 2
 * Server Port: 1667 + (ID - 1) * 2
 
-E.g., for the UAV_1:
+E.g., for UAV 1:
 
 * Server IP: localhost
 * Publisher Port: 1666
 * Server Port: 1667
 
-**Note**: fbl log files are stored in `~/.ros` and are named as `bt_trace_uav_` + ID + `.fbl`
+**Note**: `.fbl` log files are stored in `~/.ros` and are named `bt_trace_uav_` + ID + `.fbl`

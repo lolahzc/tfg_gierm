@@ -1,26 +1,36 @@
 <?xml version='1.0'?>
-<sdf version="1.0">
-<model name="jeff_electrician">
-  <pose>0 0 0.5 0 0 0</pose>
-  <static>true</static>
+<!-- Portado de Gazebo Classic a Gazebo Sim (gz).
+     Cambios respecto al original:
+       - sdf 1.0 -> 1.8.
+       - Fuera <plugin libDynamicModelPlugin.so>: es un plugin de Gazebo
+         Classic, no existe en gz y aborta la carga del modelo.
+       - Inercias: las originales tenian ixx/izz NEGATIVOS (fisicamente
+         imposibles); gz las rechaza. Al ser un modelo estatico solo hacen
+         falta valores validos, asi que van los de una caja equivalente.
+       - Colision: caja simple en vez de la malla completa del cuerpo. Es un
+         decorado estatico y colisionar contra una malla de 3.7 MB es caro
+         sin aportar nada. -->
+<sdf version="1.8">
+  <model name="jeff_electrician">
+    <static>true</static>
     <link name="link">
       <inertial>
         <mass>80.0</mass>
-        <inertia> <!-- inertias are tricky to compute -->
-          <!-- http://gazebosim.org/tutorials?tut=inertia&cat=build_robot -->
-          <ixx>-0.186819 </ixx>     
-          <ixy>-0.000257 </ixy>        
-          <ixz>-0.000008</ixz>         
-          <iyy>0.005504</iyy>       
-          <iyz>-0.003203</iyz>        
-          <izz>-0.183004</izz>     
+        <inertia>
+          <ixx>27.7</ixx>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyy>27.7</iyy>
+          <iyz>0.0</iyz>
+          <izz>1.6</izz>
         </inertia>
       </inertial>
       <collision name="collision">
+        <pose>0 0 0.9 0 0 0</pose>
         <geometry>
-          <mesh>
-            <uri>model://jeff_electrician/jeff_electrician.dae</uri>
-          </mesh>
+          <box>
+            <size>0.6 0.4 1.8</size>
+          </box>
         </geometry>
       </collision>
       <visual name="visual">
@@ -31,13 +41,5 @@
         </geometry>
       </visual>
     </link>
-  	<plugin name="dynamic_model_plugin" filename="libDynamicModelPlugin.so">
-       <update_rate>30</update_rate>
-       <initial_on>true</initial_on>
-       <trajectory_file>circle_trajectory.txt</trajectory_file>
-       <loop_enabled>true</loop_enabled>
-       <use_segmentation>true</use_segmentation>
-       <use_directional_yaw>true</use_directional_yaw>
-     </plugin>
   </model>
 </sdf>

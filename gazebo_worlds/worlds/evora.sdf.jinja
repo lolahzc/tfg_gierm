@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<!-- Mundo de la granja solar de Evora para Gazebo Sim (gz), con la misma
+     estructura que as2_gazebo_assets/worlds/heliostatos.sdf.jinja para que
+     as2_gazebo_assets lo pueda renderizar igual: mismas variables de plantilla
+     (el origen geografico y el flag que lo activa).
+
+     Se selecciona poniendo `world_name: "evora"` en el world yaml de
+     mission_planner_gazebo. as2_gazebo_assets lo encuentra porque
+     simulation_launch.py mete share/mission_planner/worlds y
+     share/mission_planner/models en GZ_SIM_RESOURCE_PATH (World.get_world_file
+     busca <world_name>.sdf.jinja por esa variable).
+
+     Los tres jeff_electrician estan en el x/y de human_target_1..3 de
+     mission_planner/config/conf.yaml, para que las tareas de tipo M (Monitor)
+     tengan algo visible debajo. -->
+<sdf version="1.8"> <world name="evora">
+        <physics name="4ms" type="ignored">
+            <max_step_size>0.004</max_step_size>
+            <real_time_factor>1.0</real_time_factor>
+        </physics>
+
+        <plugin filename="gz-sim-physics-system"
+                name="gz::sim::systems::Physics"></plugin>
+        <plugin filename="gz-sim-scene-broadcaster-system"
+                name="gz::sim::systems::SceneBroadcaster"></plugin>
+        <plugin filename="gz-sim-user-commands-system"
+                name="gz::sim::systems::UserCommands"></plugin>
+        <plugin filename="gz-sim-sensors-system"
+                name="gz::sim::systems::Sensors">
+            <render_engine>ogre2</render_engine>
+        </plugin>
+        <plugin filename="gz-sim-contact-system"
+                name="gz::sim::systems::Contact"></plugin>
+
+        <light type="directional" name="sun">
+            <cast_shadows>true</cast_shadows>
+            <pose>0 0 10 0 0 0</pose>
+            <diffuse>0.9 0.9 0.9 1</diffuse>
+            <specular>0.25 0.25 0.25 1</specular>
+            <attenuation>
+                <range>1000</range>
+                <constant>0.9</constant>
+                <linear>0.01</linear>
+                <quadratic>0.001</quadratic>
+            </attenuation>
+            <direction>-0.5 0.1 -0.9</direction>
+        </light>
+
+        {% if use_origin -%}
+        <spherical_coordinates>
+            <surface_model>EARTH_WGS84</surface_model>
+            <world_frame_orientation>ENU</world_frame_orientation>
+            <latitude_deg>{{ origin.latitude }}</latitude_deg>
+            <longitude_deg>{{ origin.longitude }}</longitude_deg>
+            <elevation>{{ origin.altitude }}</elevation>
+            <heading_deg>0.0</heading_deg>
+        </spherical_coordinates>
+        {% endif -%}
+
+        <include>
+            <uri>model://ground_plane</uri>
+        </include>
+
+        <!-- La foto aerea de la granja va 5 cm por encima del ground_plane
+             para que no haya z-fighting entre las dos superficies. La caja
+             mide 0.1 de alto, asi que con z=-0.04 su cara superior queda en
+             +0.01 y los drones (que aparecen en z=0.2) se posan sobre ella. -->
+        <include>
+            <uri>model://evora_solar_panel_farm</uri>
+            <name>granja_solar_evora</name>
+            <pose>0 0 -0.04 0 0 0</pose>
+        </include>
+
+        <!-- Carteles y marcas de suelo (bases, waypoints, operarios,
+             herramientas). Generado por scripts/gen_mission_labels.py a
+             partir de config/mission.yaml y config/conf.yaml. -->
+        <include>
+            <uri>model://mission_labels</uri>
+            <name>carteles_mision</name>
+            <pose>0 0 0 0 0 0</pose>
+        </include>
+
+        <include>
+            <uri>model://jeff_electrician</uri>
+            <name>operario_1</name>
+            <pose>10.0 10.0 0.02 0 0 -1.57</pose>
+        </include>
+        <include>
+            <uri>model://jeff_electrician</uri>
+            <name>operario_2</name>
+            <pose>-5.0 15.0 0.02 0 0 0.0</pose>
+        </include>
+        <include>
+            <uri>model://jeff_electrician</uri>
+            <name>operario_3</name>
+            <pose>5.0 20.0 0.02 0 0 1.57</pose>
+        </include>
+
+    </world>
+</sdf>

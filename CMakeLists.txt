@@ -137,13 +137,29 @@ install(DIRECTORY
   FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
 
-install(PROGRAMS scripts/mission_sequencer.py DESTINATION lib/${PROJECT_NAME})
+install(PROGRAMS scripts/swarm_initializer.py scripts/mission_sequencer.py
+             scripts/mission_viz.py scripts/gen_mission_labels.py
+        DESTINATION lib/${PROJECT_NAME})
 
 # Install config files (si tienes)
 install(DIRECTORY
   config
   DESTINATION share/${PROJECT_NAME}/
 )
+
+# Los carteles del mundo (models/mission_labels) son GENERADOS a partir de
+# config/mission.yaml y config/conf.yaml. Se regeneran en cada build para que
+# tocar la mision - o las constantes LABEL_YAW / LABEL_SCALE del script - se
+# refleje sin tener que acordarse de lanzar el script a mano: antes install()
+# se limitaba a copiar un model.sdf viejo y los cambios no aparecian nunca.
+# Si falla (por ejemplo, sin python3-pil) se avisa pero no se rompe el build.
+add_custom_target(mission_labels ALL
+  COMMAND ${CMAKE_COMMAND} -E echo "Regenerando carteles de la mision..."
+  COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_mission_labels.py
+          || ${CMAKE_COMMAND} -E echo "AVISO: no se pudieron regenerar los carteles"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "mission_labels: carteles y marcas de suelo para Gazebo"
+  VERBATIM)
 
 install(
   DIRECTORY gazebo_worlds/

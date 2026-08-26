@@ -1,7 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.actions import DeclareLaunchArgument, LogInfo, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -102,6 +102,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        # Must match mission_planner_gazebo/launch/simulation_launch.py's RMW choice,
+        # or this process can't discover the AS2 platform's topics/services at all.
+        SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
         uav_id_arg,
         config_file_arg,
         LogInfo(msg="--- LANZANDO SISTEMA DE MISIÓN (TFG) ---"),
