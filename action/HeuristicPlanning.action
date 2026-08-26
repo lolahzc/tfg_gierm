@@ -2,6 +2,11 @@
 string scenario_id
 string[] available_agents
 string[] remaining_tasks
+# Parallel to available_agents/remaining_tasks (same index = same entry).
+# Lets a real or simulated planner assign the nearest available agent to
+# each task instead of pure round-robin load balancing.
+geometry_msgs/Point[] agent_positions
+geometry_msgs/Point[] task_positions
 ---
 # Result definition
 bool success
