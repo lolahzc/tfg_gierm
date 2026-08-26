@@ -98,10 +98,26 @@ telemetry behind it:
 [battery] 26% below the minimum needed to fly home (26%); aborting task and returning
 ```
 
-In Gazebo, `mission_viz.py` draws an identity sphere, a battery sphere and a
-task-type disc above each drone, and the ground carries labelled markers for
-the charging pads, waypoints, workers and tools. See the
-[`mission_planner` README](mission_planner/README.md#visual-aids-in-gazebo).
+## Reading the simulation
+
+Everything in the world is colour-coded, so the state of the mission can be
+read without following the terminal. Three markers are stacked above each
+drone, since the models are otherwise identical:
+
+| Marker | Tells you |
+|---|---|
+| Small sphere on top | Battery: green above 60%, amber down to 30%, red below, at which point it abandons its task and flies home |
+| Large sphere | Which drone it is: `drone0` red, `drone1` green, `drone2` blue, matching its charging pad |
+| Flat disc underneath | Task type it is running, in the same colour as the waypoint posts it is flying to |
+
+On the ground, each charging pad carries its drone's colour and name, every
+task waypoint is a post of its task colour rising to the altitude the drone
+will fly to, and the workers and tool station are labelled.
+
+The full legend, including the colour of every task type, is in the
+[`mission_planner` README](mission_planner/README.md#reading-the-simulation-in-gazebo).
+The markers above the drones need the Gazebo GUI, so launch with
+`headless:=false`.
 
 ## Citation
 

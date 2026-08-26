@@ -105,26 +105,83 @@ either node will compile against it.
 | `BatteryEnough`, `RequestMobileChargingStation` | Battery bookkeeping |
 | `DoCloserInspection` | Follow-up inspection request |
 
-## Visual aids in Gazebo
+## Reading the simulation in Gazebo
 
-`scripts/mission_viz.py` draws three markers above each drone, since the
-models are otherwise identical in flight:
+Everything visible in the world is colour-coded, so the state of the mission
+can be read at a glance without following the terminal.
 
-- a large sphere in the colour of its charging pad,
-- a small sphere for the battery: green above 60%, amber down to 30%, red
-  below, which is the point at which it abandons its task and heads home,
-- a flat disc in the colour of the task type it is running, matching the
-  colour of the waypoint posts it is flying to.
+### Above each drone
 
-This needs the Gazebo GUI: the `/marker` service does not exist in headless
-mode. Pass `viz:=false` to disable it.
+The three quadrotor models are identical, so `scripts/mission_viz.py` draws
+three markers stacked over every one of them. It needs the Gazebo GUI: the
+`/marker` service does not exist in headless mode. Pass `viz:=false` to
+disable it.
 
-`scripts/gen_mission_labels.py` generates the ground signs and markers from
-`conf.yaml` and `mission.yaml`: labelled charging pads, waypoint posts at the
-altitude the drone will fly to, and markers for the workers and tools. It runs
-on every build, so editing the mission is enough for the world to follow.
-Text is baked into textures because the Ogre2 renderer does not implement
-Gazebo's TEXT marker.
+| Height | Shape | Meaning |
+|---|---|---|
+| +2.0 m | small sphere | Battery level |
+| +1.1 m | large sphere | Which drone this is |
+| +0.45 m | flat disc | Task type currently running |
+
+**Identity sphere** — one colour per drone, the same colour as its charging
+pad on the ground, so a drone and its base always match:
+
+| Drone | Colour |
+|---|---|
+| `drone0` | red |
+| `drone1` | green |
+| `drone2` | blue |
+
+**Battery sphere** — the thresholds are the ones the code actually acts on,
+so the colour says what the drone is about to do:
+
+| Colour | Battery | Meaning |
+|---|---|---|
+| green | 60% and above | Plenty of range |
+| amber | 30% to 60% | Working, but heading towards its limit |
+| red | below 30% | At or under the minimum needed to fly home; it abandons its task and returns |
+| grey | no reading yet | Telemetry has not arrived |
+
+The red threshold is not fixed at 30%: it grows with the distance to the
+charging pad, so a drone far from base turns red earlier. See
+`batteryNeededToGetHome()`.
+
+**Task disc** — the colour of the task type being executed, matching the
+waypoint posts it is flying to. A drone carrying an amber disc is heading for
+the amber posts:
+
+| Colour | Task |
+|---|---|
+| cyan | `I` Inspect |
+| orange | `A` Inspect PV array |
+| magenta | `M` Monitor a human target |
+| purple | `D` Deliver a tool |
+| yellow | `R` Recharge |
+| teal | `F` Monitor a UGV |
+| grey | No task assigned |
+
+### On the ground
+
+`scripts/gen_mission_labels.py` builds the `mission_labels` model from
+`conf.yaml` and `mission.yaml`. It runs on every build, so editing the mission
+is enough for the world to follow.
+
+| What you see | Meaning |
+|---|---|
+| Coloured disc with a lighter centre, labelled `BASE DRONE0` | That drone's charging pad, in its own colour |
+| Grey disc labelled `FREE PAD 4` | A charging station belonging to no particular drone |
+| Vertical post topped with a sphere, labelled `t_1 INSPECT` | A task waypoint. The post runs from the ground up to the altitude the drone will fly to, and carries the colour of its task type |
+| Orange ring labelled `WORKER 1` | A human target, with a technician model standing on it |
+| Purple spheres labelled `TOOLS` | The tool station |
+
+Signs are baked into textures rather than drawn as text markers: the Ogre2
+renderer does not implement Gazebo's TEXT marker, which fails with
+`Invalid Marker type [7]`.
+
+Two constants at the top of the script control how the signs look:
+`LABEL_SCALE` for their size, and `TEXTURE_ROTATION_DEG` for the text
+orientation, which cancels the 90 degree rotation Gazebo applies to the top
+face of a box.
 
 ## Monitoring with Groot
 
