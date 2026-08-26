@@ -19,7 +19,7 @@ The architecture has two layers:
 The low-level controllers are not part of this work; simple stand-ins are
 included so the software layer can be exercised in simulation.
 
-<video src="https://raw.githubusercontent.com/lolahzc/tfg_gierm/main/assets/SImulacionCompleta.webm" width="100%" controls></video>
+<video src="https://github.com/lolahzc/tfg_gierm/blob/main/assets/SImulacionCompleta.webm?raw=true" width="100%" controls></video>
 
 ## Repository layout
 
