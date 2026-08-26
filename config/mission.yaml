@@ -1,0 +1,107 @@
+# Mission plan read by scripts/mission_sequencer.py.
+#
+# Tasks are grouped into "waves": each wave is injected `delay` seconds
+# after the mission starts (i.e. after arm/offboard finishes), so a plan
+# can keep sending new work over time instead of dumping everything at
+# once. Override the file used at launch with:
+#   ros2 launch mission_planner mission_launch.py mission_file:=/path/to/other.yaml
+#
+# Task fields by type:
+#   type: I (Inspect)       - waypoints: [{x, y, z}, ...]  (cualquier numero)
+#   type: A (InspectPVArray)- waypoints: EXACTAMENTE 2 (el arbol usa wp[0] y wp[1])
+#   type: M (Monitor)       - human_target_id, distance, number
+#   type: D (DeliverTool)   - tool_id, human_target_id
+#
+# human_target_id validos (conf.yaml): human_target_1/2/3
+# tool_id validos (conf.yaml): hammer, wrench, allen_wrench, fixed_wrench,
+#                              multimeter, pliers, tweezers
+#
+# IDs must be unique across the whole plan (the heuristic planner and
+# high_level_planner track pending tasks by id).
+#
+# --- Sobre la bateria -------------------------------------------------------
+# battery_faker descarga 0.004 por tick de 500 ms mientras el dron vuela
+# (0.008/s), asi que se pasa de 100% al umbral de 30% de isBatteryEnough tras
+# ~87 s de vuelo acumulado. Este plan encadena varias oleadas largas para que
+# los drones superen ese tiempo y se dispare de verdad la recarga de
+# emergencia (vuelven a su base, cargan a 0.02/tick y siguen).
+
+waves:
+  # --- Oleada 0: arranque, un tipo distinto por dron ------------------------
+  - delay: 0.0
+    tasks:
+      # Barrido largo de inspeccion (4 puntos) - mucho vuelo, gasta bateria
+      - id: t_1
+        type: I
+        waypoints:
+          - {x: 10.0, y: 10.0, z: 5.0}
+          - {x: 15.0, y: 10.0, z: 5.0}
+          - {x: 15.0, y: 18.0, z: 6.0}
+          - {x: 10.0, y: 18.0, z: 6.0}
+      # Inspeccion de fila de paneles (A siempre lleva 2 waypoints)
+      - id: t_2
+        type: A
+        waypoints:
+          - {x: -12.0, y: 6.0, z: 5.0}
+          - {x: -12.0, y: 22.0, z: 5.0}
+      # Vigilancia de un operario
+      - id: t_3
+        type: M
+        human_target_id: human_target_1
+        distance: 4.0
+        number: 2
+
+  # --- Oleada 1: entra trabajo nuevo mientras siguen ocupados ---------------
+  - delay: 55.0
+    tasks:
+      - id: t_4
+        type: I
+        waypoints:
+          - {x: 5.0, y: -15.0, z: 6.0}
+          - {x: 12.0, y: -15.0, z: 6.0}
+          - {x: 12.0, y: -6.0, z: 7.0}
+      # Entrega de herramienta: recoge en la estacion y la lleva al operario
+      - id: t_5
+        type: D
+        tool_id: multimeter
+        human_target_id: human_target_2
+      - id: t_6
+        type: A
+        waypoints:
+          - {x: 14.0, y: -20.0, z: 5.0}
+          - {x: 14.0, y: -4.0, z: 5.0}
+
+  # --- Oleada 2: aqui es donde normalmente saltan las recargas --------------
+  - delay: 125.0
+    tasks:
+      - id: t_7
+        type: I
+        waypoints:
+          - {x: -14.0, y: -12.0, z: 7.0}
+          - {x: -20.0, y: -12.0, z: 7.0}
+          - {x: -20.0, y: -2.0, z: 6.0}
+          - {x: -14.0, y: -2.0, z: 6.0}
+      - id: t_8
+        type: M
+        human_target_id: human_target_3
+        distance: 5.0
+        number: 3
+      - id: t_9
+        type: D
+        tool_id: pliers
+        human_target_id: human_target_1
+
+  # --- Oleada 3: cierre, con los drones ya castigados de bateria ------------
+  - delay: 200.0
+    tasks:
+      - id: t_10
+        type: A
+        waypoints:
+          - {x: 20.0, y: 4.0, z: 5.0}
+          - {x: 20.0, y: 20.0, z: 5.0}
+      - id: t_11
+        type: I
+        waypoints:
+          - {x: -8.0, y: -20.0, z: 8.0}
+          - {x: 0.0, y: -22.0, z: 8.0}
+          - {x: 8.0, y: -20.0, z: 8.0}

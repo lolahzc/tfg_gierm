@@ -18,20 +18,20 @@ positions:
       z: 17.0
     
   charging_stations:
-    charging_station_1:
+    charging_station_drone0:
       x: 0.0
       y: 0.0
-      z: 0.0
+      z: 0.2
     
-    charging_station_2:
-      x: 0.0
-      y: 5.0
-      z: 0.0
+    charging_station_drone1:
+      x: 4.0
+      y: 0.0
+      z: 0.2
 
-    charging_station_3:
-      x: 0.0
-      y: -5.0
-      z: 0.0
+    charging_station_drone2:
+      x: -4.0
+      y: 0.0
+      z: 0.2
     
     charging_station_4:
       x: -10.0
