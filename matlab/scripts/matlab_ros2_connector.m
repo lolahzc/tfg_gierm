@@ -4,7 +4,7 @@ clc;
 clear mex;
 setenv('ROS_DOMAIN_ID', '16')
 %% 1. Inicialización y Carga de Datos
-config_file_path = '../config/conf.yaml';
+config_file_path = '../../mission_planner/config/conf.yaml';
 config_file = fopen(config_file_path, 'r');
 scenario_id = fscanf(config_file, 'mission_id: %s');
 fclose(config_file);
@@ -29,7 +29,7 @@ nt_client = ros2actionclient(node, '/incoming_task_action', 'mission_planner/New
 disp('Esperando al Planner de C++...');
 
 % --- LEER EL conf.yaml COMO TEXTO ---
-config_file_path = '../config/conf.yaml'; 
+config_file_path = '../../mission_planner/config/conf.yaml'; 
 default_human = 'human_target_1'; % Valores de seguridad
 default_tool  = 'hammer';
 
