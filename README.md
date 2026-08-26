@@ -19,7 +19,8 @@ The architecture has two layers:
 The low-level controllers are not part of this work; simple stand-ins are
 included so the software layer can be exercised in simulation.
 
-<video src="https://github.com/lolahzc/tfg_gierm/blob/main/assets/SImulacionCompleta.webm?raw=true" width="100%" controls></video>
+[![Simulación Completa Multi-UAV](https://img.youtube.com/vi/odCpxHCSUTk/maxresdefault.jpg)](https://www.youtube.com/watch?v=odCpxHCSUTk)
+
 
 ## Repository layout
 
