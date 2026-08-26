@@ -1,0 +1,45 @@
+/**:
+  # Global Parameters
+  ros__parameters:
+    use_sim_time: true
+    tf_timeout_threshold: 0.1
+
+/**:
+  # Platform (as2_platform_gazebo)
+  platform:
+    ros__parameters:
+      cmd_freq: 50.0  # Hz of platform commands send
+
+  # State Estimator (as2_state_estimator).
+  # set_origin_on_start needs a GPS fix, so the world yaml carries a gps
+  # payload and an origin block to match.
+  state_estimator:
+    ros__parameters:
+      use_gazebo_tf: true
+      plugin_name: "ground_truth"
+      use_gps: true
+      set_origin_on_start: true
+
+  # Motion Controller (as2_motion_controller)
+  controller_manager:
+    ros__parameters:
+      cmd_freq: 50.0 # Hz of controller commands send
+
+  # Behaviors Motion (as2_behaviors_motion): the Takeoff/Land/GoToWaypoint
+  # clients used by agent_behaviour_manager.
+  TakeoffBehavior:
+    ros__parameters:
+      takeoff_plugin_name: "takeoff_plugin_position"
+  LandBehavior:
+    ros__parameters:
+      land_plugin_name: "land_plugin_speed"
+      # Looser than the 0.2 default: with land_speed 0.5 m/s the default
+      # demands <0.1 m/s, which Gazebo's ground-contact noise may never
+      # settle under, leaving the behaviour stuck reporting LANDING.
+      land_speed_condition_percentage: 0.5
+  GoToBehavior:
+    ros__parameters:
+      go_to_plugin_name: "go_to_plugin_position"
+  FollowPathBehavior:
+    ros__parameters:
+      follow_path_plugin_name: "follow_path_plugin_position"

@@ -1,0 +1,21 @@
+# Drone spawn positions match the charging_station_droneN entries in
+# mission_planner/config/conf.yaml, so each drone starts on its own station.
+#
+# flight_time is deliberately not set: it enables Gazebo's LinearBatteryPlugin,
+# which publishes on the same topic as battery_faker but in 0-100 units, while
+# the thresholds in the code are 0-1 fractions. battery_faker owns the battery.
+world_name: "evora"
+origin:
+  latitude: 40.337494
+  longitude: -3.883197
+  altitude: 100.0
+drones:
+  - model_type: "quadrotor_base"
+    model_name: "drone0"
+    xyz:
+      - 0.0
+      - 0.0
+      - 0.2
+    payload:
+      - model_type: "gps"
+        model_name: "gps"

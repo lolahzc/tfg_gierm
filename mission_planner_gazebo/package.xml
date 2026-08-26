@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mission_planner_gazebo</name>
+  <version>0.0.1</version>
+  <description>AEROSTACK2 + Gazebo simulation stack (world, per-drone platform/estimator/controller/behaviors) used to run mission_planner in simulation</description>
+  <maintainer email="lolahercan@gmail.com">lolahercan</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>as2_core</exec_depend>
+  <exec_depend>as2_msgs</exec_depend>
+  <exec_depend>as2_gazebo_assets</exec_depend>
+  <exec_depend>as2_platform_gazebo</exec_depend>
+  <exec_depend>as2_state_estimator</exec_depend>
+  <exec_depend>as2_motion_controller</exec_depend>
+  <exec_depend>as2_behaviors_motion</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
