@@ -109,7 +109,7 @@ void GestureRecognitionFaker::send_goal()
 
     auto send_goal_options = rclcpp_action::Client<NewTaskAction>::SendGoalOptions();
     
-    // Configurar los callbacks usando lambdas
+    // Wire the callbacks with lambdas
     send_goal_options.goal_response_callback =
         [this](auto future) {
             auto goal_handle = future.get();

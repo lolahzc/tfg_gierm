@@ -14,7 +14,7 @@ try
     
     clear classes
     rehash toolboxcache
-    disp('✅ Sistema listo para usar ROS 2 en MATLAB.');
+    disp('Sistema listo para usar ROS 2 en MATLAB.');
 catch EM
-    error('❌ Error generando mensajes de ROS 2: %s', EM.message);
+    error('Error generando mensajes de ROS 2: %s', EM.message);
 end

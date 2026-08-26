@@ -29,7 +29,7 @@ def generate_launch_description():
     )
 
     # --- 2. PUENTE MANUAL (LA SOLUCIÓN AL ERROR DE TERMINAL 1) ---
-    # Gazebo no estaba enviando la posición. Esto lo fuerza.
+    # Forces the pose through, which Gazebo was not publishing.
     # Puenteamos: Gazebo /model/uav0/pose  --> ROS /uav0/ground_truth/pose
     manual_bridge = Node(
         package='ros_gz_bridge',
@@ -87,14 +87,14 @@ def generate_launch_description():
     )
 
     # --- 6. RED DE SEGURIDAD TF ---
-    # Une la Tierra con el Mapa
+    # Ties earth to map
     tf_earth_to_map = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_earth_map',
         arguments=['0', '0', '0', '0', '0', '0', 'earth', f'{uav_id}/map']
     )
 
-    # Une el Mapa con la Odometría (Cierre del bucle)
+    # Ties map to odom, closing the TF loop
     tf_map_to_odom = Node(
         package='tf2_ros', executable='static_transform_publisher',
         name='tf_map_odom',
@@ -104,7 +104,7 @@ def generate_launch_description():
     return LaunchDescription([
         LogInfo(msg="--- LANZANDO PILA AS2 CON PUENTE MANUAL ---"),
         platform,
-        manual_bridge,  # <--- Nuevo nodo crítico
+        manual_bridge,
         estimator,
         controller,
         behaviors,

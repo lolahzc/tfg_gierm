@@ -11,7 +11,7 @@ def launch_setup(context, *args, **kwargs):
     config_file = LaunchConfiguration('config_file').perform(context)
     mission_file = LaunchConfiguration('mission_file').perform(context)
 
-    # 1. Obtener número de drones del argumento (por defecto 3)
+    # Number of drones, from the launch argument
     try:
         n_drones = int(LaunchConfiguration('n_drones').perform(context))
     except Exception:
@@ -51,15 +51,15 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{'id': uav_id, 'battery_mode': 'recharge_in_base', 'config_file': config_file}]
         ))
 
-    # NOTA: Si el mission_sequencer ya arma los drones, podemos comentar el swarm_initializer 
-    # para que no haya conflictos. Si lo necesitas, simplemente descoméntalo.
+    # The mission_sequencer already arms the drones, so swarm_initializer is
+    # to avoid conflicts. Uncomment it if you need it.
     # nodes_to_launch.append(Node(
     #     package='mission_planner', executable='swarm_initializer.py',
     #     name='swarm_initializer', output='screen',
     #     parameters=[{'n_drones': n_drones}]
     # ))
 
-    # 4. NODOS DE SECUENCIA Y MISION (¡Descomentado!)
+    # Mission sequencer
     nodes_to_launch.append(Node(
         package='mission_planner',
         executable='mission_sequencer.py',
@@ -68,9 +68,9 @@ def launch_setup(context, *args, **kwargs):
         parameters=[{'n_drones': n_drones, 'mission_file': mission_file}]
     ))
 
-    # 5. HUD VISUAL EN GAZEBO (opcional, viz:=false para desactivarlo)
-    # Dibuja sobre cada dron una bola de su color (identidad) y otra con el
-    # nivel de bateria, porque los tres modelos son identicos en Gazebo.
+    # Gazebo HUD (viz:=false to disable). Draws an identity sphere, a
+    # battery sphere and a task disc above each drone, since the three
+    # models look identical in Gazebo.
     nodes_to_launch.append(Node(
         package='mission_planner',
         executable='mission_viz.py',
@@ -88,11 +88,11 @@ def generate_launch_description():
         # Must match mission_planner_gazebo/launch/simulation_launch.py's RMW choice,
         # or this process can't discover the AS2 platform's topics/services at all.
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
-        DeclareLaunchArgument('n_drones', default_value='3', description='Número de drones a lanzar'),
+        DeclareLaunchArgument('n_drones', default_value='3', description='Number of drones to launch'),
         DeclareLaunchArgument('config_file', default_value=os.path.join(pkg_share, 'config', 'conf.yaml')),
         DeclareLaunchArgument('mission_file', default_value=os.path.join(pkg_share, 'config', 'mission.yaml'),
                               description='YAML mission plan for mission_sequencer.py (see config/mission.yaml)'),
         DeclareLaunchArgument('viz', default_value='true',
-                              description='Dibuja el HUD de identificacion/bateria en Gazebo'),
+                              description='Draw the identity/battery HUD in Gazebo'),
         OpaqueFunction(function=launch_setup)
     ])

@@ -35,7 +35,7 @@
 #include "geometry_msgs/msg/point.hpp"
 #include "sensor_msgs/msg/battery_state.hpp"
 #include "geographic_msgs/msg/geo_point.hpp"
-#include "as2_msgs/msg/pose_stamped_with_id.hpp" // No se si lo queremos con/sin ID
+#include "as2_msgs/msg/pose_stamped_with_id.hpp"
 
 //Forward declarations
 class Planner;

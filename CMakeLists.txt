@@ -104,12 +104,12 @@ if(yaml-cpp_FOUND)
   target_link_libraries(${PROJECT_NAME}_core yaml-cpp)
 endif()
 
-# Usar la nueva forma de enlazar las interfaces en lugar de rosidl_target_interfaces
-# Obtener el target de typesupport
+# Link the generated interfaces the modern way, not rosidl_target_interfaces
+# Get the typesupport target
 rosidl_get_typesupport_target(c_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_c")
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-# Enlazar los tipos de soporte a la biblioteca
+# Link the typesupport into the library
 target_link_libraries(${PROJECT_NAME}_core ${c_typesupport_target})
 target_link_libraries(${PROJECT_NAME}_core ${cpp_typesupport_target})
 
@@ -141,24 +141,22 @@ install(PROGRAMS scripts/swarm_initializer.py scripts/mission_sequencer.py
              scripts/mission_viz.py scripts/gen_mission_labels.py
         DESTINATION lib/${PROJECT_NAME})
 
-# Install config files (si tienes)
+# Install config files
 install(DIRECTORY
   config
   DESTINATION share/${PROJECT_NAME}/
 )
 
-# Los carteles del mundo (models/mission_labels) son GENERADOS a partir de
-# config/mission.yaml y config/conf.yaml. Se regeneran en cada build para que
-# tocar la mision - o las constantes LABEL_YAW / LABEL_SCALE del script - se
-# refleje sin tener que acordarse de lanzar el script a mano: antes install()
-# se limitaba a copiar un model.sdf viejo y los cambios no aparecian nunca.
-# Si falla (por ejemplo, sin python3-pil) se avisa pero no se rompe el build.
+# The world signs (models/mission_labels) are generated from
+# config/mission.yaml and config/conf.yaml. Regenerated on every build so a
+# change to the mission, or to the script constants, is picked up without
+# having to remember to run the script by hand.
 add_custom_target(mission_labels ALL
-  COMMAND ${CMAKE_COMMAND} -E echo "Regenerando carteles de la mision..."
+  COMMAND ${CMAKE_COMMAND} -E echo "Regenerating mission labels..."
   COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_mission_labels.py
-          || ${CMAKE_COMMAND} -E echo "AVISO: no se pudieron regenerar los carteles"
+          || ${CMAKE_COMMAND} -E echo "WARNING: could not regenerate the mission labels"
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMENT "mission_labels: carteles y marcas de suelo para Gazebo"
+  COMMENT "mission_labels: Gazebo signs and ground markings"
   VERBATIM)
 
 install(

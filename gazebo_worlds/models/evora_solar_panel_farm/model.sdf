@@ -1,8 +1,7 @@
 <?xml version="1.0" ?>
-<!-- Portado de Gazebo Classic a Gazebo Sim (gz).
-     El original usaba <material><script> con materiales Ogre
-     (model://.../materials/scripts), que Gazebo Sim no soporta. Aqui la misma
-     textura se aplica como albedo_map PBR, que es el equivalente en gz. -->
+<!-- Ported from Gazebo Classic to Gazebo Sim: the original used an Ogre
+     material script, which Gazebo Sim does not support, so the same texture
+     is applied as a PBR albedo map. -->
 <sdf version="1.8">
   <model name="evora_solar_panel_farm">
     <static>true</static>

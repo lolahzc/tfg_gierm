@@ -1,15 +1,9 @@
 <?xml version='1.0'?>
-<!-- Portado de Gazebo Classic a Gazebo Sim (gz).
-     Cambios respecto al original:
-       - sdf 1.0 -> 1.8.
-       - Fuera <plugin libDynamicModelPlugin.so>: es un plugin de Gazebo
-         Classic, no existe en gz y aborta la carga del modelo.
-       - Inercias: las originales tenian ixx/izz NEGATIVOS (fisicamente
-         imposibles); gz las rechaza. Al ser un modelo estatico solo hacen
-         falta valores validos, asi que van los de una caja equivalente.
-       - Colision: caja simple en vez de la malla completa del cuerpo. Es un
-         decorado estatico y colisionar contra una malla de 3.7 MB es caro
-         sin aportar nada. -->
+<!-- Ported from Gazebo Classic to Gazebo Sim:
+       - sdf 1.0 -> 1.8
+       - dropped the Classic-only DynamicModelPlugin
+       - the original inertias had negative ixx/izz, which are invalid
+       - box collision instead of the full body mesh: it is static scenery -->
 <sdf version="1.8">
   <model name="jeff_electrician">
     <static>true</static>

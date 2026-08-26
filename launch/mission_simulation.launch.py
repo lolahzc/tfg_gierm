@@ -7,15 +7,15 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     # --- ARGUMENTOS ---
-    # Permitimos cambiar el ID y el archivo de configuración desde la terminal si hace falta
+    # Drone id and config file can be overridden from the command line
     uav_id_arg = DeclareLaunchArgument(
         'uav_id', default_value='uav0',
-        description='Identificador del UAV (namespace)'
+        description='UAV identifier (namespace)'
     )
     
-    # Ruta por defecto a tu conf.yaml (Ajusta si tu carpeta se llama distinto)
-    # Asumo que está en install/share/mission_planner/config tras compilar
-    # O puedes apuntar directamente al src si prefieres para desarrollo
+    # Default path to conf.yaml
+    # Installed under share/mission_planner/config after building
+    # Point it at src/ instead when developing
     config_pkg_dir = get_package_share_directory('mission_planner')
     default_config_path = os.path.join(config_pkg_dir, 'config', 'conf.yaml')
     
@@ -31,8 +31,8 @@ def generate_launch_description():
     # --- NODOS DE TU TFG ---
 
     # 1. PLANIFICADOR GLOBAL (High Level Planner)
-    # Este nodo decide qué tareas se hacen. No suele llevar namespace específico del dron
-    # porque podría gestionar varios, pero se le pasa el config.
+    # Decides which tasks get done. No per-drone namespace, since it can
+    # manage several of them; it just takes the config.
     planner_node = Node(
         package='mission_planner',
         executable='high_level_planner',
@@ -46,9 +46,9 @@ def generate_launch_description():
     )
 
     # 2. GESTOR DEL AGENTE (Agent Behaviour Manager)
-    # Este es el nodo que tiene el Behavior Tree.
-    # Es CRÍTICO que esté en el namespace del dron (uav0) para que sus logs
-    # y tópicos no choquen si pones más drones.
+    # This node runs the behavior tree.
+    # Must live in the drone namespace so its logs and topics do not
+    # clash when more drones are added.
     agent_node = Node(
         package='mission_planner',
         executable='agent_behaviour_manager',
@@ -56,7 +56,7 @@ def generate_launch_description():
         name='agent_behaviour_manager',
         output='screen',
         parameters=[
-            # En tu código cpp, concatenas ns_prefix + id. 
+            # The C++ side concatenates ns_prefix + id.
             # Si pones ns_prefix='uav' e id='0', sale 'uav0'.
             {'id': '0'},          
             {'ns_prefix': 'uav'},
@@ -67,12 +67,12 @@ def generate_launch_description():
     )
 
     # 3. SIMULADOR DE BATERÍA (Battery Faker)
-    # Publica el estado de la batería simulado.
+    # Publishes the simulated battery state.
     battery_faker = Node(
         package='mission_planner',
         executable='battery_faker',
         name='battery_faker',
-        # namespace=uav_id, # Opcional, tu código ya usa el parámetro 'id' para los tópicos
+        # namespace=uav_id,  # optional: the code already uses the 'id' parameter
         output='screen',
         parameters=[
             {'id': uav_id}, # Se le pasa 'uav0'
@@ -82,7 +82,7 @@ def generate_launch_description():
     )
 
     # 4. SIMULADOR HEURÍSTICO (Matlab Faker)
-    # Simula la respuesta del planificador complejo.
+    # Stands in for the external planner.
     heuristic_sim = Node(
         package='mission_planner',
         executable='heuristic_planner_simulator',
@@ -92,7 +92,7 @@ def generate_launch_description():
     )
 
     # 5. SIMULADOR UGV (IST UGV Faker)
-    # Mueve los robots de tierra simulados.
+    # Drives the simulated ground robots.
     ugv_faker = Node(
         package='mission_planner',
         executable='ist_ugv_faker',

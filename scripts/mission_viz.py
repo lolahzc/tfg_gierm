@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""HUD en Gazebo: identifica cada dron y ensena su bateria en vivo.
+"""Gazebo HUD: identifies each drone and shows its battery live.
 
-Sobre cada dron dibuja dos marcadores:
-  * una bola grande del color de su base (drone0 rojo, drone1 verde,
-    drone2 azul), para saber cual es cual en vuelo - los tres modelos son
-    identicos y sin esto no hay forma de distinguirlos;
-  * una bola pequena encima cuyo color indica la bateria
-    (verde >60%, amarillo 30-60%, rojo <30% = va a irse a recargar).
+Draws three markers above every drone:
+  * a large sphere in the colour of its charging pad, to tell the otherwise
+    identical drones apart in flight;
+  * a small sphere whose colour encodes the battery level;
+  * a flat disc in the colour of the task type currently being executed.
 
-Se dibuja con el servicio /marker de Gazebo. Se usan SPHERE/CYLINDER a
-proposito: el marcador TEXT (tipo 7) NO esta implementado en el renderer
-Ogre2 de Gazebo Sim 8 y falla con "Invalid Marker type [7]", asi que el
-texto del mundo va horneado en texturas (ver gen_mission_labels.py) y aqui
-solo se usan formas.
+Only shapes are used: the TEXT marker is not implemented in the Ogre2
+renderer, so world text is baked into textures (see gen_mission_labels.py).
+All markers go out in a single /marker_array call per cycle.
 
-Todos los marcadores de un ciclo van en UNA sola llamada a /marker_array,
-porque cada llamada lanza un proceso `gz service`.
-
-Lanzar con:
+Run with:
     ros2 run mission_planner mission_viz.py
 """
 import subprocess
@@ -35,9 +29,8 @@ DRONE_COLORS = {
     'drone2': (0.20, 0.35, 0.86),
 }
 
-# Mismos colores que usan los postes de waypoint en el suelo
-# (gen_mission_labels.TASK_COLORS): si el dron lleva el disco naranja, va a por
-# los postes naranjas. Sin tarea = gris apagado.
+# Same colours as the waypoint posts on the ground
+# (gen_mission_labels.TASK_COLORS), so a drone matches the posts it flies to.
 TASK_COLORS = {
     'I': (0.00, 0.63, 0.78),   # Inspect
     'A': (0.94, 0.55, 0.08),   # InspectPVArray
@@ -50,8 +43,7 @@ NO_TASK_COLOR = (0.35, 0.35, 0.35)
 
 
 def battery_color(pct):
-    """Verde / amarillo / rojo. El rojo coincide con el umbral (30%) en el
-    que isBatteryEnough() aborta la tarea y manda el dron a recargar."""
+    """Green / amber / red, with red at the low-battery threshold."""
     if pct is None:
         return (0.5, 0.5, 0.5)
     if pct >= 0.60:
@@ -85,9 +77,9 @@ class MissionViz(Node):
 
         self.timer = self.create_timer(1.0 / rate, self.publish_markers)
         self.get_logger().info(
-            f'HUD activo para {", ".join(self.drones)} a {rate:.1f} Hz. '
-            'Bola grande = identidad del dron, bola pequena = bateria, '
-            'disco = tipo de tarea (mismo color que sus postes en el suelo).')
+            f'HUD active for {", ".join(self.drones)} at {rate:.1f} Hz. '
+            'Large sphere = drone identity, small sphere = battery, '
+            'disc = task type (same colour as its waypoint posts).')
 
     def _mk_pose_cb(self, drone):
         def cb(msg):
@@ -101,7 +93,7 @@ class MissionViz(Node):
 
     def _mk_task_cb(self, drone):
         def cb(msg):
-            # Formato "t_1|I"; vacio si el dron no tiene tarea.
+            # Format "t_1|I"; empty when the drone has no task.
             self.task[drone] = msg.data.split('|')[-1] if msg.data else ''
         return cb
 
@@ -109,7 +101,7 @@ class MissionViz(Node):
     def _marker(ns, mid, mtype, x, y, z, rgb, scale, zscale=None):
         r, g, b = rgb
         if zscale is None:
-            # Los cilindros se usan como disco plano bajo el dron.
+            # Cylinders are drawn as a flat disc under the drone.
             zscale = 0.12 if mtype == 'CYLINDER' else scale
         return (f'marker {{ action: ADD_MODIFY ns: "{ns}" id: {mid} '
                 f'type: {mtype} visibility: GUI '
@@ -126,22 +118,19 @@ class MissionViz(Node):
             p = self.pose.get(d)
             if p is None:
                 continue
-            # OJO: los ids empiezan en 1, nunca en 0. Gazebo trata el id 0 como
-            # "sin asignar" y crea un marcador NUEVO en cada actualizacion en
-            # vez de mover el existente, asi que el primer dron iba dejando un
-            # rastro de bolas por todo el mapa mientras los demas se movian
-            # bien.
+            # Ids never start at 0: Gazebo treats 0 as unset and adds a new
+            # marker on every update instead of moving the existing one.
             base_id = (i + 1) * 10
 
             color = DRONE_COLORS.get(d, (0.7, 0.7, 0.7))
-            # Identidad del dron.
+            # Drone identity.
             parts.append(self._marker('viz_id', base_id, 'SPHERE',
                                       p.x, p.y, p.z + 1.1, color, 0.85))
-            # Nivel de bateria.
+            # Battery level.
             parts.append(self._marker('viz_bat', base_id + 1, 'SPHERE',
                                       p.x, p.y, p.z + 2.0,
                                       battery_color(self.batt.get(d)), 0.5))
-            # Tipo de tarea en curso, del mismo color que sus postes en el suelo.
+            # Task type, matching the colour of its waypoint posts.
             tcolor = TASK_COLORS.get(self.task.get(d, ''), NO_TASK_COLOR)
             parts.append(self._marker('viz_task', base_id + 2, 'CYLINDER',
                                       p.x, p.y, p.z + 0.45, tcolor, 1.5))
@@ -158,8 +147,8 @@ class MissionViz(Node):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=3.0, check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            # Gazebo puede no estar levantado todavia; no es motivo para morir.
-            self.get_logger().warn(f'No se pudieron dibujar los marcadores: {e}',
+            # Gazebo may not be up yet; not a reason to die.
+            self.get_logger().warn(f'Could not draw the markers: {e}',
                                    throttle_duration_sec=10.0)
 
 

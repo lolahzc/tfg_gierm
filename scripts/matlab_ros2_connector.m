@@ -26,7 +26,7 @@ end
 
 %% 3. Inyector de Misiones (Sustituye al Sequencer)
 nt_client = ros2actionclient(node, '/incoming_task_action', 'mission_planner/NewTask');
-disp('⏳ Esperando al Planner de C++...');
+disp('Esperando al Planner de C++...');
 
 % --- LEER EL conf.yaml COMO TEXTO ---
 config_file_path = '../config/conf.yaml'; 
@@ -63,12 +63,12 @@ try
             end
         end
         fclose(fid);
-        disp(['✅ Parámetros extraídos del YAML. Humano: ', default_human, ' | Herramienta: ', default_tool]);
+        disp(['Parámetros extraídos del YAML. Humano: ', default_human, '| Herramienta: ', default_tool]);
     else
-        disp('⚠️ No se encontró el archivo conf.yaml. Usando valores por defecto.');
+        disp('No se encontró el archivo conf.yaml. Usando valores por defecto.');
     end
 catch ME
-    disp(['⚠️ Error procesando el YAML: ', ME.message]);
+    disp(['Error procesando el YAML: ', ME.message]);
 end
 % --------------------------------
 
@@ -77,7 +77,7 @@ while ~waitForServer(nt_client, "Timeout", 5)
     disp('   ... sigo esperando al servidor de inyección de tareas ...');
 end
 
-disp('🚀 Planner detectado. Inyectando misiones desde Task.mat...');
+disp('Planner detectado. Inyectando misiones desde Task.mat...');
 
 for i = 2:length(Task_mat)
     m = Task_mat(i);
@@ -130,14 +130,14 @@ for i = 2:length(Task_mat)
     fprintf('   - Tarea enviada: %s (Tipo: %c)\n', goal.task.id, char(goal.task.type));
     pause(0.2); 
 end
-disp('✅ Inyección completa.');
+disp('Inyección completa.');
 
 %% 4. Servidor Heurístico
 action_type = 'mission_planner/HeuristicPlanning'; 
 planning_server = ros2actionserver(node, '/heuristic_planning', action_type, ...
     'ExecuteGoalFcn', {@heuristicPlanningCallback, userData});
 mission_over_sub = ros2subscriber(node, '/mission_over', 'mission_planner/MissionOver');
-disp('✨ Servidor listo y esperando peticiones de planificación...');
+disp('Servidor listo y esperando peticiones de planificación...');
 
 %% 5. Bucle Principal
 mission_over = false;
@@ -145,7 +145,7 @@ while ~mission_over
     if ~isempty(mission_over_sub.LatestMessage)
         if mission_over_sub.LatestMessage.value == true
             mission_over = true;
-            disp('🏁 Misión terminada.');
+            disp('Misión terminada.');
         end
     end
     pause(0.5);
@@ -154,7 +154,7 @@ clear nt_client planning_server mission_over_sub node;
 
 %% 6. Callback de Planificación
 function [result_msg, success] = heuristicPlanningCallback(src, goalStruct, defaultFeedbackMsg, defaultResultMsg, userData)
-    disp('>>> 🟢 Petición de planificación recibida!');
+    disp('>>> Petición de planificación recibida!');
     
     goal_msg = goalStruct.goal;
     result_msg = defaultResultMsg;
@@ -164,7 +164,7 @@ function [result_msg, success] = heuristicPlanningCallback(src, goalStruct, defa
     cxx_tasks  = cellstr(goal_msg.remaining_tasks);
     
     if isempty(cxx_agents) || isempty(cxx_tasks)
-        disp('⚠️ Petición vacía. Devolviendo plan nulo.');
+        disp('Petición vacía. Devolviendo plan nulo.');
         result_msg.success = true;
         success = true;
         return;
@@ -207,9 +207,9 @@ function [result_msg, success] = heuristicPlanningCallback(src, goalStruct, defa
             end
             result_msg.planning_result(r) = tq_msg;
         end
-        disp('>>> ✅ Plan enviado.');
+        disp('>>> Plan enviado.');
     catch ME
-        disp(['❌ Error: ', ME.message]);
+        disp(['Error: ', ME.message]);
         result_msg.success = false;
         success = false;
     end

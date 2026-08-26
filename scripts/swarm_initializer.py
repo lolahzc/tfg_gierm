@@ -8,12 +8,12 @@ class SwarmInitializer(Node):
     def __init__(self):
         super().__init__('swarm_initializer')
         
-        # 1. Leer el número de drones del Launch File
+        # Read the number of drones from the launch file
         self.declare_parameter('n_drones', 3)
         self.n_drones = self.get_parameter('n_drones').value
         self.drone_ids = [f'drone{i}' for i in range(self.n_drones)]
         
-        # 2. Crear diccionarios de clientes para TODOS los drones
+        # Build the client dictionaries for every drone
         self.arming_clients = {}
         self.offboard_clients = {}
         
@@ -23,9 +23,9 @@ class SwarmInitializer(Node):
 
     def arm_and_offboard_all(self):
         for d_id in self.drone_ids:
-            self.get_logger().info(f'🚀 Preparando {d_id}...')
+            self.get_logger().info(f' Preparando {d_id}...')
             
-            # Esperar a que los servicios de Aerostack2/Gazebo estén levantados
+            # Wait for the AEROSTACK2/Gazebo services to come up
             self.offboard_clients[d_id].wait_for_service()
             self.arming_clients[d_id].wait_for_service()
 
@@ -41,21 +41,21 @@ class SwarmInitializer(Node):
             future_arm = self.arming_clients[d_id].call_async(req)
             rclpy.spin_until_future_complete(self, future_arm)
             
-            self.get_logger().info(f'✅ {d_id} armado y en Offboard.')
+            self.get_logger().info(f' {d_id} armado y en Offboard.')
             
-            # Darle a Gazebo 3 segundos de respiro entre despegues
+            # Give Gazebo a few seconds between takeoffs
             time.sleep(3.0)
 
-        self.get_logger().info('¡Todo el enjambre está armado y listo para recibir misiones de MATLAB!')
+        self.get_logger().info('Whole swarm armed and ready to receive missions')
 
 def main(args=None):
     rclpy.init(args=args)
     initializer = SwarmInitializer()
     
-    # Inicia la secuencia de armado
+    # Start the arming sequence
     initializer.arm_and_offboard_all()
     
-    # Destruir nodo y salir limpiamente cuando termine
+    # Destroy the node and exit cleanly
     initializer.destroy_node()
     rclpy.shutdown()
 

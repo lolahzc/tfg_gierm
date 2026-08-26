@@ -100,7 +100,7 @@ class MissionSequencer(Node):
         """
         ready_drones = set()
         for d_id in self.drone_ids:
-            self.get_logger().info(f'🚀 Preparando {d_id}...')
+            self.get_logger().info(f'Preparing {d_id}')
 
             self.get_logger().info(f'  -> {d_id}: Activando Offboard...')
             offboard_ok = self._call_bool_service(
@@ -113,22 +113,22 @@ class MissionSequencer(Node):
                     self.arming_clients[d_id], d_id, 'set_arming_state')
 
             if offboard_ok and armed_ok:
-                self.get_logger().info(f'✅ {d_id} armado y en Offboard.')
+                self.get_logger().info(f' {d_id} armado y en Offboard.')
                 ready_drones.add(d_id)
             else:
                 self.get_logger().error(
-                    f'❌ {d_id} no se pudo preparar (offboard={offboard_ok}, armed={armed_ok}); '
-                    'se omite de esta misión.')
+                    f'{d_id} could not be prepared (offboard={offboard_ok}, armed={armed_ok}); '
+                    'skipping it for this mission.')
 
             # Give Gazebo a moment of breathing room between drones.
             time.sleep(3.0)
 
         if ready_drones:
             self.get_logger().info(
-                f'✅ {len(ready_drones)}/{len(self.drone_ids)} agentes listos: '
+                f' {len(ready_drones)}/{len(self.drone_ids)} agentes listos: '
                 f'{sorted(ready_drones)}')
         else:
-            self.get_logger().error('❌ Ningún agente pudo prepararse. No se inyectará ninguna misión.')
+            self.get_logger().error('No agent could be prepared; no mission will be injected.')
         return ready_drones
 
     # ------------------------------------------------------------------
@@ -140,12 +140,12 @@ class MissionSequencer(Node):
             with open(self.mission_file) as f:
                 plan = yaml.safe_load(f) or {}
         except OSError as e:
-            self.get_logger().error(f'❌ No se pudo leer mission_file {self.mission_file}: {e}')
+            self.get_logger().error(f'Could not read mission_file {self.mission_file}: {e}')
             return []
 
         waves = plan.get('waves', [])
         if not waves:
-            self.get_logger().warn(f'⚠️ {self.mission_file} no define ninguna wave de tareas.')
+            self.get_logger().warn(f'{self.mission_file} defines no task waves.')
         return waves
 
     def build_goal(self, task_cfg):
@@ -176,20 +176,20 @@ class MissionSequencer(Node):
         try:
             goal_msg = self.build_goal(task_cfg)
         except (KeyError, ValueError) as e:
-            self.get_logger().error(f"❌ Tarea '{task_cfg.get('id', '?')}' mal definida: {e}")
+            self.get_logger().error(f"Task '{task_cfg.get('id', '?')}' is malformed: {e}")
             return
 
         if not self._action_client.wait_for_server(timeout_sec=self.arm_offboard_timeout_sec):
             self.get_logger().error(
-                f"❌ incoming_task_action no disponible, no se pudo enviar tarea '{task_cfg['id']}'")
+                f"incoming_task_action unavailable, could not send task '{task_cfg['id']}'")
             return
 
-        self.get_logger().info(f"Enviando tarea {task_cfg['id']} al planificador...")
+        self.get_logger().info(f"Sending task {task_cfg['id']} to the planner")
         self._action_client.send_goal_async(goal_msg)
 
     def inject_wave(self, wave, wave_index):
         tasks = wave.get('tasks', [])
-        self.get_logger().info(f'🌊 Inyectando wave {wave_index} ({len(tasks)} tareas)...')
+        self.get_logger().info(f'Injecting wave {wave_index} ({len(tasks)} tasks)')
         for task_cfg in tasks:
             self.send_goal(task_cfg)
             time.sleep(0.5)  # small gap so the planner processes each goal cleanly
@@ -204,11 +204,11 @@ class MissionSequencer(Node):
             target_time = mission_start + float(wave.get('delay', 0.0))
             remaining = target_time - time.monotonic()
             if remaining > 0:
-                self.get_logger().info(f'⏳ Esperando {remaining:.1f}s para la wave {i}...')
+                self.get_logger().info(f'Waiting {remaining:.1f}s for wave {i}')
                 time.sleep(remaining)
             self.inject_wave(wave, i)
 
-        self.get_logger().info('🎉 Todas las waves de la misión han sido inyectadas.')
+        self.get_logger().info('All mission waves have been injected.')
 
 
 def main(args=None):

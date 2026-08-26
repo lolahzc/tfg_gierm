@@ -32,25 +32,17 @@ Agent::Agent(Planner* planner,
   battery_(1.0),
   battery_enough_(true)
 {
-  // Nodo local del agente. OJO: solo se usa para logging y para los clientes
-  // de accion (enviar un goal no necesita spin). NO se le pueden colgar
-  // suscripciones: este nodo no lo spinea nadie.
+  // Local node, used only for logging and action clients: sending a goal
+  // needs no spinning. Do NOT attach subscriptions here, nothing spins it.
   nh_ = rclcpp::Node::make_shared("agent_node_" + id_);
 
-  // Topics reales de AEROSTACK2 / battery_faker. Los valores que habia aqui
-  // ("/ual/pose" y "/battery_fake") son de la epoca ROS1 y ya no existen, y
-  // ademas nadie los sobreescribia desde el launch.
+  // AEROSTACK2 / battery_faker topics.
   pose_topic_ = "/self_localization/pose";
   battery_topic_ = "/sensor_measurements/battery";
 
-  // Las suscripciones se crean sobre el NODO DEL PLANNER, que si se spinea.
-  // Colgadas de nh_ no llegaba ni un mensaje, asi que battery_ se quedaba en
-  // su valor inicial 1.0 y position_ en el origen para todos los agentes. Con
-  // eso el filtro `getBattery() > 0.3` de performTaskAllocation() daba
-  // siempre cierto (se asignaban tareas a drones casi descargados) y las
-  // agent_positions que recibia el planificador heuristico eran todas (0,0,0),
-  // de modo que "asignar al agente mas cercano" no significaba nada y las
-  // tareas lejanas podian caer en el dron peor situado.
+  // Subscriptions live on the planner node, which is the one being spun.
+  // On nh_ they would never fire, leaving battery_ and position_ at their
+  // initial values for every agent.
   position_sub_ = planner_->create_subscription<geometry_msgs::msg::PoseStamped>(
       "/" + id_ + pose_topic_, rclcpp::SensorDataQoS(),
       std::bind(&Agent::positionCallbackAS2, this, _1));
@@ -70,7 +62,7 @@ Agent::Agent(Planner* planner,
       std::bind(&Agent::handleBatteryEnoughAccepted, this, std::placeholders::_1));
 
   task_result_as_ = rclcpp_action::create_server<mission_planner::action::TaskResult>(
-      planner_, // <--- ¡CAMBIO CRÍTICO AQUI! Usar planner_ en lugar de nh_
+      planner_, // the planner node is the one being spun
       "/" + id_ + "/task_result",
       [this](const rclcpp_action::GoalUUID & uuid, 
             std::shared_ptr<const mission_planner::action::TaskResult::Goal> goal) {
@@ -83,7 +75,7 @@ Agent::Agent(Planner* planner,
           this->handleTaskResultAccepted(goal_handle);
       });
 
-  RCLCPP_INFO(nh_->get_logger(), "Agente [%s] de tipo [%s] inicializado (ROS2).", id_.c_str(), type_.c_str());                    
+  RCLCPP_INFO(nh_->get_logger(), "Agent [%s] of type [%s] initialised", id_.c_str(), type_.c_str());                    
 }
 
 
@@ -91,8 +83,8 @@ Agent::Agent(Planner* planner,
 
 Agent::~Agent()
 {
-  RCLCPP_INFO(nh_->get_logger(), "Destruyendo agente [%s]", id_.c_str());
-  // No es necesario "shutdown" manual en ROS2: shared_ptr libera los recursos automáticamente.
+  RCLCPP_INFO(nh_->get_logger(), "Destroying agent [%s]", id_.c_str());
+  // No manual shutdown needed: the shared_ptr releases the resources.
 }
 
 
@@ -202,24 +194,23 @@ int Agent::getQueueSize()
 
 void Agent::sendQueueToAgent()
 {
-  RCLCPP_INFO(nh_->get_logger(), "🔄 [sendQueueToAgent] Enviando cola de tareas al agente %s", id_.c_str());
+  RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] sending the task queue to agent %s", id_.c_str());
   
-  // 1 s, no 5: esto se llama desde el bucle principal del planner, asi que
-  // cada segundo de espera es un segundo sin procesar beacons ni resultados.
-  // El servidor del agente ya esta levantado en cuanto el agente se conecta.
+  // Kept short: this runs in the planner main loop, so every second spent
+  // waiting is a second not spent processing beacons and results.
   if (!ntl_ac_->wait_for_action_server(std::chrono::seconds(1))) {
     RCLCPP_WARN(nh_->get_logger(),
-      "[sendQueueToAgent] El agente %s no expone su servidor de NewTaskList; omitiendo envio.",
+      "[sendQueueToAgent] agent %s exposes no NewTaskList server; skipping",
       id_.c_str());
     return;
   }
   mission_planner::action::NewTaskList::Goal goal;
 
   goal.agent_id = id_;
-  RCLCPP_INFO(nh_->get_logger(), "📨 [sendQueueToAgent] Agent ID: %s", goal.agent_id.c_str());
+  RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] agent id: %s", goal.agent_id.c_str());
 
   auto queue_size = task_queue_.size();
-  RCLCPP_INFO(nh_->get_logger(), "📊 [sendQueueToAgent] Tamaño de cola: %zu", queue_size);
+  RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] queue size: %zu", queue_size);
 
   for (int i = 0; i < queue_size; i++) {
     classes::Task* task = task_queue_.front();
@@ -228,10 +219,10 @@ void Agent::sendQueueToAgent()
     task_msg.id = task->getID();
     task_msg.type = task->getType();
     
-    RCLCPP_INFO(nh_->get_logger(), "📋 [sendQueueToAgent] Serializando tarea: %s, tipo: %c", 
+    RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] serialising task %s, type %c",
                 task_msg.id.c_str(), task_msg.type);
 
-    // DEBUG: Mostrar TODOS los campos de la tarea original
+    // Debug: dump every field of the original task
     RCLCPP_INFO(nh_->get_logger(), "   - Tarea original - HumanID: '%s'", task->getHumanID().c_str());
     RCLCPP_INFO(nh_->get_logger(), "   - Tarea original - Distance: %f", task->getDistance());
     RCLCPP_INFO(nh_->get_logger(), "   - Tarea original - Number: %d", task->getNumber());
@@ -275,7 +266,7 @@ void Agent::sendQueueToAgent()
         
       case 'R': case 'r':
         task_msg.recharge.charging_station_id = "charging_station_" + id_; 
-        task_msg.recharge.initial_percentage = 0.3; // Límite para volver a casa
+        task_msg.recharge.initial_percentage = 0.3; // threshold to head home
         task_msg.recharge.final_percentage = 0.99;  // Recarga hasta el 99%
         
         RCLCPP_INFO(nh_->get_logger(), "   - Station: '%s', Init: %f, Final: %f", 
@@ -285,7 +276,7 @@ void Agent::sendQueueToAgent()
         break;
         
       default:
-        RCLCPP_WARN(nh_->get_logger(), "   - Tipo de tarea no manejado: %c", task_msg.type);
+        RCLCPP_WARN(nh_->get_logger(), "   - unhandled task type: %c", task_msg.type);
         break;
     }
 
@@ -295,11 +286,11 @@ void Agent::sendQueueToAgent()
     task_queue_.pop();
   }
 
-  RCLCPP_INFO(nh_->get_logger(), "🚀 [sendQueueToAgent] Enviando goal con %zu tareas", goal.task_list.size());
+  RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] sending a goal with %zu tasks", goal.task_list.size());
   
   ntl_ac_->async_send_goal(goal);
   
-  RCLCPP_INFO(nh_->get_logger(), "✅ [sendQueueToAgent] Goal enviado al agente %s", id_.c_str());
+  RCLCPP_INFO(nh_->get_logger(), "[sendQueueToAgent] goal sent to agent %s", id_.c_str());
 }
 
 float Agent::computeTaskCost(classes::Task* task)
@@ -920,7 +911,7 @@ rclcpp_action::CancelResponse Agent::handleBatteryEnoughCancel(
 
 void Agent::handleBatteryEnoughAccepted(std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::BatteryEnough>> goal_handle)
 {
-  // Ejecutar en un hilo separado para no bloquear el executor
+  // Run on a separate thread so the executor is not blocked
   std::thread{
     [this, goal_handle]() {
       const auto goal = goal_handle->get_goal();
@@ -934,7 +925,7 @@ void Agent::handleBatteryEnoughAccepted(std::shared_ptr<rclcpp_action::ServerGoa
       feedback->status = "battery_enough_ updated";
       goal_handle->publish_feedback(feedback);
       
-      // Verificar si la acción fue cancelada
+      // Check whether the action was cancelled
       if (goal_handle->is_canceling()) {
         auto result = std::make_shared<mission_planner::action::BatteryEnough::Result>();
         result->ack = false;
@@ -943,7 +934,7 @@ void Agent::handleBatteryEnoughAccepted(std::shared_ptr<rclcpp_action::ServerGoa
         return;
       }
       
-      // Completar la acción exitosamente
+      // Complete the action successfully
       auto result = std::make_shared<mission_planner::action::BatteryEnough::Result>();
       result->ack = true;
       goal_handle->succeed(result);
@@ -1070,7 +1061,7 @@ void Agent::handleTaskResultAccepted(
                 {
                     auto inspection_msg = mission_planner::action::DoCloserInspection::Goal();
                     
-                    // CORRECCIÓN: Acceder directamente a los campos del goal y convertir tipos
+                    // Read the goal fields directly and convert the types
                     inspection_msg.ids = goal->do_closer_inspection.ids;
                     inspection_msg.xyz_coordinates = goal->do_closer_inspection.xyz_coordinates;
                     
@@ -1087,7 +1078,7 @@ void Agent::handleTaskResultAccepted(
                 }
             }
 
-            // Finalizar la acción
+            // Finish the action
             goal_handle->succeed(result);
         }
     }.detach();
@@ -1179,18 +1170,10 @@ Planner::Planner(mission_planner::msg::PlannerBeacon beacon) :
 
     RCLCPP_INFO(get_logger(), "[Planner] Entering main while loop...");
 
-    // El bucle spinea a 20 Hz pero sigue publicando el beacon a beacon_rate_
-    // (1 Hz), que es lo que esperan los agentes.
-    //
-    // Antes ambas cosas iban al mismo ritmo: spin_some() se llamaba UNA VEZ
-    // POR SEGUNDO. Como en la misma iteracion hay llamadas bloqueantes
-    // (sendQueueToAgent -> wait_for_action_server), el executor podia pasar
-    // varios segundos seguidos sin procesar nada, y los beacons de los
-    // agentes se quedaban sin atender. Con 3 drones publicando en
-    // /agent_beacon eso hacia que agentes vivos superasen el timeout de 60 s
-    // y el planner los diese por desconectados ("Destruyendo agente"),
-    // quedandose con un solo dron disponible al que asignar todo el trabajo
-    // mientras los otros dos se quedaban parados al 100% de bateria.
+    // Spin at 20 Hz while still publishing the beacon at beacon_rate_.
+    // Doing both at 1 Hz starved the executor, because the same iteration
+    // also makes blocking calls, and live agents hit the 60 s beacon
+    // timeout and were dropped.
     constexpr double kSpinHz = 20.0;
     rclcpp::Rate loop_rate(kSpinHz);
     const double beacon_period = 1.0 / beacon_rate_;
@@ -1228,11 +1211,11 @@ void Planner::checkActionServer()
 {
   if (!action_server_checked_) {
       if (hp_ac_->wait_for_action_server(std::chrono::seconds(1))) {
-          RCLCPP_INFO(get_logger(), "✅ Heuristic planning action server is NOW AVAILABLE!");
+          RCLCPP_INFO(get_logger(), "Heuristic planning action server is NOW AVAILABLE!");
           action_server_checked_ = true;
           check_server_timer_->cancel();  // Detener el timer
       } else {
-          RCLCPP_WARN(get_logger(), "⏳ Waiting for heuristic planning action server...");
+          RCLCPP_WARN(get_logger(), "Waiting for heuristic planning action server...");
       }
   }
 }
@@ -1257,7 +1240,7 @@ rclcpp_action::CancelResponse Planner::handle_cancel(
 void Planner::handle_accepted(
     const std::shared_ptr<rclcpp_action::ServerGoalHandle<mission_planner::action::NewTask>> goal_handle)
 {
-    // Ejecutar en un hilo separado para no bloquear el executor
+    // Run on a separate thread so the executor is not blocked
     std::thread{
         [this, goal_handle]() {
             this->execute_incoming_task(goal_handle);
@@ -1277,7 +1260,7 @@ void Planner::execute_incoming_task(
         feedback->status = "Reading the New Task";
         goal_handle->publish_feedback(feedback);
 
-        // Procesar la tarea
+        // Process the task
         std::string id = goal->task.id;
         char type = goal->task.type;
         char old_type;
@@ -1354,7 +1337,7 @@ void Planner::execute_incoming_task(
         feedback->status = "Adding the New Task to pending_tasks_ map";
         goal_handle->publish_feedback(feedback);
 
-        // Crear la nueva tarea
+        // Build the new task
         switch(goal->task.type)
         {
             case 'M':
@@ -1396,7 +1379,7 @@ void Planner::execute_incoming_task(
 
         performTaskAllocation();
 
-        // Verificar si se canceló la acción
+        // Check whether the action was cancelled
         if (goal_handle->is_canceling()) {
             RCLCPP_INFO(get_logger(), "[incomingTask] Incoming Task: Preempted");
             result->ack = false;
@@ -1622,19 +1605,19 @@ void Planner::performTaskAllocation()
   // instead of piling up overlapping HeuristicPlanning goals.
   bool expected = false;
   if (!hp_allocation_in_progress_.compare_exchange_strong(expected, true)) {
-    RCLCPP_INFO(get_logger(), "[performTaskAllocation] ⏭️ Allocation already in progress, skipping");
+    RCLCPP_INFO(get_logger(), "[performTaskAllocation] Allocation already in progress, skipping");
     return;
   }
 
-  RCLCPP_INFO(get_logger(), "[performTaskAllocation] 🔄 Starting async task allocation...");
+  RCLCPP_INFO(get_logger(), "[performTaskAllocation] Starting async task allocation...");
 
-  // Ejecutar en un thread separado para no bloquear
+  // Run on a separate thread so the executor is not blocked
   std::thread([this]() {
     
-    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] 📡 Waiting for Heuristic Planning action server...");
+    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] Waiting for Heuristic Planning action server...");
 
     if (!hp_ac_->wait_for_action_server(std::chrono::seconds(5))) {
-      RCLCPP_ERROR(this->get_logger(), "[performTaskAllocation] ❌ Heuristic planning action server not available");
+      RCLCPP_ERROR(this->get_logger(), "[performTaskAllocation] Heuristic planning action server not available");
       hp_allocation_in_progress_ = false;
       return;
     }
@@ -1651,25 +1634,13 @@ void Planner::performTaskAllocation()
         agent_point.z = agent_pos.getZ();
         goal.agent_positions.push_back(agent_point);
       } else {
-        // Bateria por debajo del umbral: este agente no entra en el solver,
-        // pero antes simplemente se le descartaba y se quedaba SIN NADA que
-        // hacer. El unico sitio que asignaba recarga era la rama "t_R" del
-        // resultado del planificador heuristico, y el simulador
-        // (heuristic_planner_simulator) no emite ningun t_R - de hecho la
-        // accion HeuristicPlanning ni siquiera transporta el nivel de
-        // bateria. Resultado observado: el dron vaciaba su cola al detectar
-        // bateria baja, no recibia tarea de recarga, y GoNearChargingStation
-        // se quedaba repitiendo "First task of the queue isn't type Recharge"
-        // mientras el dron seguia posado donde se quedo sin bateria, a 13 m
-        // de su estacion.
-        //
-        // La recarga es una respuesta de seguridad, no una decision de
-        // optimizacion, asi que la asigna el planner directamente. Solo si la
-        // cola esta vacia: el agente la vacia justo antes de avisar, y asi no
-        // se apila la misma tarea en cada ronda de asignacion.
+        // Below the battery threshold the agent is left out of the solver,
+        // so the planner assigns the recharge task itself. Recharging is a
+        // safety response, not something the solver should decide. Only when
+        // the queue is empty, so it is not stacked on every round.
         if(agent.second.getQueueSize() == 0) {
           RCLCPP_WARN(this->get_logger(),
-            "[performTaskAllocation] 🔋 %s con bateria %.0f%% (<=30%%): asignando recarga.",
+            "[performTaskAllocation] %s at %.0f%% battery (<=30%%): assigning a recharge task",
             agent.first.c_str(), agent.second.getBattery() * 100.0f);
           agent.second.addTaskToQueue(recharge_task_);
           agent.second.sendQueueToAgent();
@@ -1687,7 +1658,7 @@ void Planner::performTaskAllocation()
       goal.task_positions.push_back(task_point);
     }
 
-    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] 🎯 Requesting allocation for %zu agents, %zu tasks", 
+    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] Requesting allocation for %zu agents, %zu tasks",
                 goal.available_agents.size(), goal.remaining_tasks.size());
 
     // SOLUCIÓN CORRECTA: Usar lambdas directamente sin std::bind
@@ -1696,11 +1667,11 @@ void Planner::performTaskAllocation()
     send_goal_options.goal_response_callback =
       [this](auto goal_handle) {
         if (!goal_handle) {
-          RCLCPP_ERROR(this->get_logger(), "[goalResponse] ❌ Goal was rejected by server");
+          RCLCPP_ERROR(this->get_logger(), "[goalResponse] Goal was rejected by server");
           // Rejected: no result_callback will ever fire for this goal.
           hp_allocation_in_progress_ = false;
         } else {
-          RCLCPP_INFO(this->get_logger(), "[goalResponse] ✅ Goal accepted by server");
+          RCLCPP_INFO(this->get_logger(), "[goalResponse] Goal accepted by server");
           // Keep the handle alive, or rclcpp_action stops delivering the result.
           hp_goal_handle_ = goal_handle;
         }
@@ -1711,10 +1682,10 @@ void Planner::performTaskAllocation()
         this->handleHeuristicPlanningResult(result);
       };
 
-    // Enviar de forma asíncrona - NO BLOQUEANTE
+    // Sent asynchronously, non-blocking
     hp_ac_->async_send_goal(goal, send_goal_options);
     
-    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] 📨 Goal sent async, returning immediately");
+    RCLCPP_INFO(this->get_logger(), "[performTaskAllocation] Goal sent async, returning immediately");
 
   }).detach();
 }
@@ -1722,7 +1693,7 @@ void Planner::performTaskAllocation()
 void Planner::handleHeuristicPlanningResult(
     const rclcpp_action::ClientGoalHandle<mission_planner::action::HeuristicPlanning>::WrappedResult & result)
 {
-  RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] 📥 Result received!");
+  RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Result received!");
 
   // This goal is done one way or another: free the handle and let the next
   // beacon/task event start a new allocation.
@@ -1732,7 +1703,7 @@ void Planner::handleHeuristicPlanningResult(
   switch (result.code) {
     case rclcpp_action::ResultCode::SUCCEEDED:
       if(result.result->success) {
-        RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] ✅ Planning succeeded!");
+        RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Planning succeeded!");
         
         // Procesar el resultado
         for(auto &agent : agent_map_) {
@@ -1771,7 +1742,7 @@ void Planner::handleHeuristicPlanningResult(
           }
         }
 
-        // Enviar queues a los agentes
+        // Send the queues to the agents
         for(auto &agent : agent_map_) {
           agent.second.sendQueueToAgent();
         }
@@ -1780,23 +1751,23 @@ void Planner::handleHeuristicPlanningResult(
           agent.second.deleteOldTaskQueue();
         }
 
-        RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] 🎉 Task allocation completed!");
+        RCLCPP_INFO(this->get_logger(), "[handleHeuristicPlanningResult] Task allocation completed!");
         
       } else {
-        RCLCPP_WARN(this->get_logger(), "[handleHeuristicPlanningResult] ❌ Planning failed");
+        RCLCPP_WARN(this->get_logger(), "[handleHeuristicPlanningResult] Planning failed");
       }
       break;
       
     case rclcpp_action::ResultCode::ABORTED:
-      RCLCPP_ERROR(this->get_logger(), "[handleHeuristicPlanningResult] 🚫 Planning was aborted");
+      RCLCPP_ERROR(this->get_logger(), "[handleHeuristicPlanningResult] Planning was aborted");
       break;
       
     case rclcpp_action::ResultCode::CANCELED:
-      RCLCPP_WARN(this->get_logger(), "[handleHeuristicPlanningResult] ⚠️ Planning was canceled");
+      RCLCPP_WARN(this->get_logger(), "[handleHeuristicPlanningResult] Planning was canceled");
       break;
       
     default:
-      RCLCPP_ERROR(this->get_logger(), "[handleHeuristicPlanningResult] ‼️ Unknown result code");
+      RCLCPP_ERROR(this->get_logger(), "[handleHeuristicPlanningResult] ‼ Unknown result code");
       break;
   }
 }
@@ -1861,7 +1832,7 @@ bool Planner::updateTaskParams(const std::shared_ptr<const mission_planner::acti
     std::string id = goal->task.id;
     char type = goal->task.type;
 
-    // Mover las declaraciones fuera del switch
+    // Declarations kept outside the switch
     std::string m_human_target_id;
     float distance;
     int number;
