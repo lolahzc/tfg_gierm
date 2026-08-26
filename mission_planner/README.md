@@ -183,14 +183,60 @@ Two constants at the top of the script control how the signs look:
 orientation, which cancels the 90 degree rotation Gazebo applies to the top
 face of a box.
 
-## Monitoring with Groot
+## Monitoring the behaviour tree with Groot
 
-Each agent exposes a BehaviorTree.CPP v3 ZMQ publisher that
-[Groot](https://github.com/BehaviorTree/Groot) can attach to, live or from a
-log file:
+Each agent publishes its tree over ZMQ, so
+[Groot](https://github.com/BehaviorTree/Groot) can show it live: the active
+branch is highlighted as the drone flies, which makes it easy to capture what
+the tree was doing at a given moment.
+
+Groot 1 is the version to use. Groot 2 speaks a different protocol and does
+not talk to BehaviorTree.CPP v3.
+
+### Ports
+
+One pair per drone, derived from the trailing digits of its id:
+
+| Drone | Publisher port | Server port |
+|---|---|---|
+| `drone0` | 1666 | 1667 |
+| `drone1` | 1668 | 1669 |
+| `drone2` | 1670 | 1671 |
+
+Each agent logs its own pair at startup:
+
+```
+[agent_behaviour_manager_drone1]: Groot live monitoring on publisher port 1668, server port 1669
+```
+
+### Live monitoring
+
+With the simulation running, open Groot in *Monitor* mode and connect to:
 
 - Server IP: `localhost`
-- Publisher port: `1666 + (ID - 1) * 2`
-- Server port: `1667 + (ID - 1) * 2`
+- Publisher port and Server port: the pair for the drone you want to watch
 
-Log files are written to `~/.ros` as `bt_trace_uav_<ID>.fbl`.
+One Groot window shows one drone. To watch several at once, open one window
+per drone, each on its own pair of ports.
+
+### Replaying afterwards
+
+For screenshots it is often easier to record a trace and step through it
+frame by frame, rather than trying to catch the moment live. Set
+`groot_log_file` and Groot will replay the resulting `.fbl` in *Log* mode:
+
+```bash
+ros2 launch mission_planner mission_launch.py n_drones:=3 \
+  groot_log_file:=/tmp/bt_drone0.fbl
+```
+
+### Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `groot_enabled` | `true` | Publish the tree over ZMQ |
+| `groot_base_port` | `1666` | First port; each drone takes the next free pair |
+| `groot_log_file` | `""` | Path for the `.fbl` trace. Empty disables it |
+
+Set `groot_enabled:=false` if the ports clash with something else on the
+machine.

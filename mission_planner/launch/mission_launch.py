@@ -35,14 +35,24 @@ def launch_setup(context, *args, **kwargs):
         name='heuristic_planner_simulator', output='screen'
     ))
 
-    # 3. NODOS POR DRON (Generados en bucle de forma segura)
+    # Groot trace. One file per drone, so the paths do not collide.
+    groot_log = LaunchConfiguration('groot_log_file').perform(context)
+    groot_enabled = LaunchConfiguration('groot_enabled').perform(context).lower() in ('true', '1')
+
     for i in range(n_drones):
         uav_id = f"drone{i}"
         
         nodes_to_launch.append(Node(
             package='mission_planner', executable='agent_behaviour_manager',
             name=f'agent_behaviour_manager_{uav_id}', output='screen',
-            parameters=[{'id': uav_id, 'ns_prefix': '', 'pose_frame_id': 'earth', 'config_file': config_file}]
+            parameters=[{
+                'id': uav_id, 'ns_prefix': '', 'pose_frame_id': 'earth',
+                'config_file': config_file,
+                'groot_enabled': groot_enabled,
+                # A single path would have every drone overwrite the same file.
+                'groot_log_file': (
+                    groot_log.replace('.fbl', f'_{uav_id}.fbl') if groot_log else ''),
+            }]
         ))
         
         nodes_to_launch.append(Node(
@@ -94,5 +104,10 @@ def generate_launch_description():
                               description='YAML mission plan for mission_sequencer.py (see config/mission.yaml)'),
         DeclareLaunchArgument('viz', default_value='true',
                               description='Draw the identity/battery HUD in Gazebo'),
+        DeclareLaunchArgument('groot_enabled', default_value='true',
+                              description='Publish each behaviour tree over ZMQ for Groot'),
+        DeclareLaunchArgument('groot_log_file', default_value='',
+                              description='Path for the Groot .fbl trace; the drone id is '
+                                          'appended to it. Empty disables the trace'),
         OpaqueFunction(function=launch_setup)
     ])

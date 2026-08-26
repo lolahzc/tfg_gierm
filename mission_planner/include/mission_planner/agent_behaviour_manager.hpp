@@ -655,6 +655,14 @@ private:
     // Behavior Tree Members
     BT::BehaviorTreeFactory factory_;
     BT::Tree tree_;
+    // Groot support. Both must outlive the tree, so they are held here.
+    // The ZMQ publisher serves live monitoring; the file logger writes a .fbl
+    // trace that Groot can replay afterwards.
+    bool groot_enabled_{true};
+    int groot_base_port_{1666};
+    std::string groot_log_file_;
+    std::unique_ptr<BT::PublisherZMQ> bt_zmq_publisher_;
+    std::unique_ptr<BT::FileLogger> bt_file_logger_;
     std::unique_ptr<std::thread> bt_thread_;
     std::atomic_bool bt_running_;
 

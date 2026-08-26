@@ -1930,6 +1930,13 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
   this->declare_parameter<std::string>("pose_topic", "/" + beacon_.id + "/self_localization/pose");
   this->declare_parameter<std::string>("state_topic", "/" + beacon_.id + "/platform/info");
   this->declare_parameter<std::string>("battery_topic", "/" + beacon_.id + "/sensor_measurements/battery");
+  // Groot: live monitoring of the behavior tree, and an optional .fbl trace
+  // that Groot can replay. Ports are derived from the drone id so several
+  // agents can be monitored at the same time.
+  this->declare_parameter<bool>("groot_enabled", true);
+  this->declare_parameter<int>("groot_base_port", 1666);
+  this->declare_parameter<std::string>("groot_log_file", "");
+
   this->declare_parameter<float>("take_off_height", 10.0);
   this->declare_parameter<float>("distance_error", 2.0);
   this->declare_parameter<float>("goto_error", 1.0);
@@ -1941,6 +1948,10 @@ AgentNode::AgentNode(const mission_planner::msg::AgentBeacon& beacon, const rclc
   this->get_parameter("pose_topic", pose_topic_);
   this->get_parameter("state_topic", state_topic_);
   this->get_parameter("battery_topic", battery_topic_);
+  this->get_parameter("groot_enabled", groot_enabled_);
+  this->get_parameter("groot_base_port", groot_base_port_);
+  this->get_parameter("groot_log_file", groot_log_file_);
+
   this->get_parameter("take_off_height", take_off_height_);
   this->get_parameter("distance_error", distance_error_);
   this->get_parameter("goto_error", goto_error_);
@@ -2129,6 +2140,32 @@ void AgentNode::initializeBehaviorTree() {
       
       // Give every node a pointer to this AgentNode
       initializeBTNodes();
+
+      // Groot. Each drone needs its own pair of ports, derived from the
+      // trailing digits of its id, so several agents can be monitored at once.
+      if (groot_enabled_) {
+        unsigned base = groot_base_port_;
+        const std::string digits = beacon_.id.substr(beacon_.id.find_first_of("0123456789") == std::string::npos
+                                                    ? beacon_.id.size()
+                                                    : beacon_.id.find_first_of("0123456789"));
+        if (!digits.empty()) base += 2u * static_cast<unsigned>(std::stoul(digits));
+        try {
+          bt_zmq_publisher_ = std::make_unique<BT::PublisherZMQ>(tree_, 25, base, base + 1);
+          RCLCPP_INFO(this->get_logger(),
+            "Groot live monitoring on publisher port %u, server port %u", base, base + 1);
+        } catch (const std::exception& e) {
+          RCLCPP_WARN(this->get_logger(), "Could not start the Groot publisher: %s", e.what());
+        }
+      }
+
+      if (!groot_log_file_.empty()) {
+        try {
+          bt_file_logger_ = std::make_unique<BT::FileLogger>(tree_, groot_log_file_.c_str());
+          RCLCPP_INFO(this->get_logger(), "Behavior tree trace: %s", groot_log_file_.c_str());
+        } catch (const std::exception& e) {
+          RCLCPP_WARN(this->get_logger(), "Could not open the trace file: %s", e.what());
+        }
+      }
       
       // Start the behavior tree thread
       bt_running_ = true;
